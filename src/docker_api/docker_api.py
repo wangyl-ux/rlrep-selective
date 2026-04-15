@@ -223,10 +223,9 @@ def analyse_files(tool, file, logs, now, sarif_outputs, output_version, import_p
                 logs.write(exc)
 
         # create result folder with time
-        results_folder = '/home/pc/disk1/guohy/SolidifI/smartbugs/results/' + tool + '/' + now
-        if not os.path.exists(results_folder):
-            os.makedirs(results_folder)
-        # os.makedirs(os.path.dirname(results_folder), exist_ok=True)
+        base_results_dir = os.environ.get('SMARTBUGS_RESULTS_DIR', os.path.abspath('results'))
+        results_folder = os.path.join(base_results_dir, tool, now)
+        os.makedirs(results_folder, exist_ok=True)
 
         # check if config file as all required fields
         if 'default' not in cfg['docker_image'] or cfg['docker_image'] == None:
