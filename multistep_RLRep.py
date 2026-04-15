@@ -441,11 +441,8 @@ class Model(nn.Module):
 
     def beam_search(self, inputs, size):
         self.eval()
-        config = self.config
-        end_token = config.END_TOKEN
-        preds = self.actor.beam_search(inputs, size)
-        preds = [x[:-1] if x[-1] == end_token else x for x in preds]
-        return preds
+        _, best_preds = self.actor.beam_search(inputs, size)
+        return best_preds
 
     def pretrain(self, inputs, targets, mode):
         self.optimizer_actor.zero_grad()

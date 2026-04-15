@@ -5,6 +5,8 @@ from smartBugs import *
 from similarity_compute import *
 from entropy_compute import get_entropy
 
+LAST_FITNESS_DETAILS = None
+
 
 def get_logger(paths):
     logging.basicConfig(level=logging.DEBUG)
@@ -68,7 +70,22 @@ def get_batch(path_code, path_ast, config, in_w2i, pretrain):
             yield batch_in1, batch_in2, batch_in3
 
 def fitness_function2(original_contract, repair_contract) -> float:
+    global LAST_FITNESS_DETAILS
     reward = 0
+    detail = {
+        'contract': os.path.basename(repair_contract),
+        'reward': 0.0,
+        'compile_ok': 0,
+        'compile_fail': 0,
+        'smartbugs_used': 0,
+        'smartbugs_improve': 0,
+        'smartbugs_equal': 0,
+        'smartbugs_worse': 0,
+        'similarity_used': 0,
+        'entropy_used': 0,
+        'invalid_action': 0,
+        'status': 'unknown',
+    }
     with open(repair_contract) as f:
         repair_contract_code = f.read()
     with open(original_contract) as f:
@@ -84,19 +101,31 @@ def fitness_function2(original_contract, repair_contract) -> float:
         solcx.compile_files(repair_contract, solc_version=version)
     except:
         reward -= 0.02
+        detail['compile_fail'] = 1
+        detail['status'] = 'compile_fail'
+        detail['reward'] = reward
+        LAST_FITNESS_DETAILS = detail
         with open(repair_contract, 'w') as f:
             f.write(original_contract_code)
         return reward
+    detail['compile_ok'] = 1
     error, now_error = detect(original_contract, repair_contract, 60)
     if error == -1 or now_error == -1:
         pass
     else:
+        detail['smartbugs_used'] = 1
         if now_error < error:
             reward += 0.025
+            detail['smartbugs_improve'] = 1
         else:
+            if now_error == error:
+                detail['smartbugs_equal'] = 1
+            else:
+                detail['smartbugs_worse'] = 1
             reward -= 0.025
     contract_sims = get_similarity(original_contract, first=False)
     repair_sims = get_similarity(repair_contract, first=False)
+    detail['similarity_used'] = 1
     if repair_sims < contract_sims:
         reward -= 0.014
     else:
@@ -104,6 +133,7 @@ def fitness_function2(original_contract, repair_contract) -> float:
     cache = True
     original_entropy = get_entropy(original_contract, cache, first=False)
     repair_entropy = get_entropy(repair_contract, cache, first=False)
+    detail['entropy_used'] = 1
     if abs(original_entropy - 3.2) > abs(repair_entropy - 3.2):
         reward += 0.014
     else:
@@ -112,7 +142,16 @@ def fitness_function2(original_contract, repair_contract) -> float:
         reward = 1
     if reward == 0.0:
         reward = -0.0001
+    detail['reward'] = reward
+    detail['status'] = 'positive' if reward > 0 else 'zero_or_negative'
+    LAST_FITNESS_DETAILS = detail
     return reward
+
+
+def get_last_fitness_details():
+    if LAST_FITNESS_DETAILS is None:
+        return None
+    return dict(LAST_FITNESS_DETAILS)
 
 def get_action():
     action_map = [

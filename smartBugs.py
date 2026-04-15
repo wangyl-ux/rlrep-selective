@@ -126,6 +126,4 @@ def smart(contract_path, ltime):
             for obj in execution_result['analysis']['issues']:
                 if obj['title'] == 'Unchecked CALL return value':
                     error += 1
-            else:
-                return -1
     return error

@@ -26,6 +26,54 @@ class Config_RL_multistep:
         self.END_TOKEN = 101
 
 
+def summarize_rewards(epoch, reward_details, logger):
+    if not reward_details:
+        return 0.0, 0
+
+    rewards = [detail['reward'] for detail in reward_details]
+    total = len(reward_details)
+    mean_reward = sum(rewards) / total
+    min_reward = min(rewards)
+    max_reward = max(rewards)
+    non_negative = sum(1 for reward in rewards if reward >= 0)
+    negative = total - non_negative
+
+    compile_ok = sum(detail.get('compile_ok', 0) for detail in reward_details)
+    compile_fail = sum(detail.get('compile_fail', 0) for detail in reward_details)
+    invalid_action = sum(detail.get('invalid_action', 0) for detail in reward_details)
+    smartbugs_used = sum(detail.get('smartbugs_used', 0) for detail in reward_details)
+    smartbugs_improve = sum(detail.get('smartbugs_improve', 0) for detail in reward_details)
+    smartbugs_equal = sum(detail.get('smartbugs_equal', 0) for detail in reward_details)
+    smartbugs_worse = sum(detail.get('smartbugs_worse', 0) for detail in reward_details)
+    similarity_used = sum(detail.get('similarity_used', 0) for detail in reward_details)
+    entropy_used = sum(detail.get('entropy_used', 0) for detail in reward_details)
+    positive = sum(1 for reward in rewards if reward > 0)
+    zero_or_negative = total - positive
+
+    samples = []
+    for detail in reward_details[:6]:
+        samples.append('{}:{}:{:.6f}'.format(detail.get('status', 'unknown'), detail['contract'], detail['reward']))
+    sample_text = ' | '.join(samples) if samples else 'none'
+
+    logger.info(
+        'reward stats. epoch: {}. mean: {:.6f}, min: {:.6f}, max: {:.6f}, non_negative: {}, negative: {}'.format(
+            epoch, mean_reward, min_reward, max_reward, non_negative, negative
+        )
+    )
+    logger.info(
+        'reward breakdown. epoch: {}. compile_ok: {}, compile_fail: {}, invalid_action: {}, smartbugs_used: {}, smartbugs_improve: {}, smartbugs_equal: {}, smartbugs_worse: {}, similarity_used: {}, entropy_used: {}, positive: {}, zero_or_negative: {}'.format(
+            epoch, compile_ok, compile_fail, invalid_action, smartbugs_used, smartbugs_improve, smartbugs_equal, smartbugs_worse, similarity_used, entropy_used, positive, zero_or_negative
+        )
+    )
+    logger.info(
+        'compile pass rate. epoch: {}. {}/{} = {:.4f}'.format(
+            epoch, compile_ok, total, compile_ok / total if total else 0.0
+        )
+    )
+    logger.info('reward samples. epoch: {}. {}'.format(epoch, sample_text))
+    return mean_reward, non_negative
+
+
 if __name__ == "__main__":
     model_name = sys.argv[1]  # "multistep_RLRep" or "mutation"
     path = sys.argv[2]  # "dataset_vul/newALLBUGS"
@@ -73,13 +121,13 @@ if __name__ == "__main__":
                 loss_actor += loss
                 logger.info('Epoch: {}, Batch: {}, Loss: actor:{}'.format(epoch, step, loss_actor / (step + 1),))
 
-            preds, ats, names, rewards = [], [], [], []
+            preds, ats, names, rewards, reward_details = [], [], [], [], []
             valid_code_dir = "dataset_vul/newALLBUGS/validation/threelines-tokenseq"
             valid_ast_dir = "dataset_vul/newALLBUGS/validation/ast"
             for step, batch in enumerate(get_batch(valid_code_dir, valid_ast_dir, config, in_w2i, pretrain=False)):
                 batch_in1, batch_in2, batch_in3 = batch
                 if beam_search_use > 0:
-                    pred = model(batch[:-1], False, size=beam_search_use)[0]
+                    pred = model(batch[:-1], False, size=beam_search_use)
                 else:
                     pred = model(batch[:-1], False, size=beam_search_use)
                 for at in pred:
@@ -89,17 +137,50 @@ if __name__ == "__main__":
             for tup in zip(ats, names):
                 reward = choose_action(tup[1], tup[0], False)
                 rewards.append(reward)
+                detail = get_last_fitness_details()
+                if reward == -0.03:
+                    detail = {
+                        'contract': tup[1] + '.sol',
+                        'reward': reward,
+                        'compile_ok': 0,
+                        'compile_fail': 0,
+                        'invalid_action': 1,
+                        'smartbugs_used': 0,
+                        'smartbugs_improve': 0,
+                        'smartbugs_equal': 0,
+                        'smartbugs_worse': 0,
+                        'similarity_used': 0,
+                        'entropy_used': 0,
+                        'status': 'invalid_action',
+                    }
+                elif detail is None:
+                    detail = {
+                        'contract': tup[1] + '.sol',
+                        'reward': reward,
+                        'compile_ok': 0,
+                        'compile_fail': 0,
+                        'invalid_action': 0,
+                        'smartbugs_used': 0,
+                        'smartbugs_improve': 0,
+                        'smartbugs_equal': 0,
+                        'smartbugs_worse': 0,
+                        'similarity_used': 0,
+                        'entropy_used': 0,
+                        'status': 'unknown',
+                    }
+                reward_details.append(detail)
 
             positive_repair = 0
             for x in rewards:
                 if x >= 0:
                     positive_repair += 1
+            mean_reward, _ = summarize_rewards(epoch, reward_details, logger)
             if positive_repair > best_positive_repair:
-                print('model update. the {0}-th epoch. positive reward / total : {1} / {2}'.format(epoch, positive_repair, len(names)))
+                print('model update. the {0}-th epoch. positive reward / total : {1} / {2}, mean reward: {3:.6f}'.format(epoch, positive_repair, len(names), mean_reward))
                 best_positive_repair = positive_repair
                 model.save('dataset_vul/newALLBUGS/model/{}_{}'.format(model_name, epoch))
             else:
-                print('model NOT update. the {0}-th epoch. positive reward / total : {1} / {2}'.format(epoch, positive_repair, len(names)))
+                print('model NOT update. the {0}-th epoch. positive reward / total : {1} / {2}, mean reward: {3:.6f}'.format(epoch, positive_repair, len(names), mean_reward))
 
                 
     if model_name == 'mutation':
