@@ -1,4 +1,5 @@
 from utils2 import *
+import solidityparser_compat
 import random
 
 def get_fault_line(_path) -> list:
@@ -6,15 +7,7 @@ def get_fault_line(_path) -> list:
         lines = f.readlines()
     bugline = finds(_path)[-1]
     fault_code_sequence = lines[bugline].strip()
-    parser = SolidityParser(CommonTokenStream(SolidityLexer(InputStream(fault_code_sequence))))
-    tree = parser.sourceUnit()
-    code_line = tree.toCodeSequence()
-    regex = r'(\[)[0-9\s]*(\])'
-    code_line = re.sub(regex, '', code_line)
-    regex2 = "<missing [^>]+>"
-    code_line = re.sub(regex2, '', code_line)
-    tokenSeq = [x for x in code_line.split(' ') if not x == '' and not x == '<EOF>']
-    return tokenSeq
+    return solidityparser_compat.tokenize_code_fragment(fault_code_sequence)
 
 def finds(contract_path):
     with open(contract_path) as cf:

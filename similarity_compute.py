@@ -3,6 +3,7 @@ from gensim.models.fasttext import FastText
 from antlr4 import *
 from scipy.spatial import distance
 import numpy as np
+import solidityparser_compat
 from solidityparser.SolidityLexer import SolidityLexer
 from solidityparser.SolidityParser import SolidityParser
 
@@ -22,14 +23,8 @@ def get3TokenSeq(path1, path2):
             with open(path3, 'w') as f:
                 for line in lines[bugline - 1 + i]:
                     f.write(line)
-            parser = SolidityParser(CommonTokenStream(SolidityLexer(FileStream(path3))))
-            tree = parser.sourceUnit()
-            code_line = tree.toCodeSequence()
-            regex = r'(\[)[0-9\s]*(\])'
-            code_line = re.sub(regex, '', code_line)
-            regex2 = "<missing [^>]+>"
-            code_line = re.sub(regex2, '', code_line)
-            tokenSeq = [x for x in code_line.split(' ') if not x == '' and not x == '<EOF>']
+            with open(path3) as single_line_file:
+                tokenSeq = solidityparser_compat.tokenize_code_fragment(single_line_file.read())
             seq = ' '.join(tokenSeq)
             again.write(seq)
             again.write('\n')
@@ -54,7 +49,7 @@ def getSimilarity(v, e):
     denominator = np.linalg.norm(e, axis=1) + np.linalg.norm(v)
     return 1 - np.divide(numerator, denominator)
 
-def get_similarity(contract_code_path):
+def get_similarity(contract_code_path, first=None):
     five_list = []
     bts = [0, 1, 2, 3, 4]
     for bt in bts:

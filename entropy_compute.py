@@ -2,10 +2,11 @@ import os
 import re
 import subprocess
 from antlr4 import *
+import solidityparser_compat
 from solidityparser.SolidityLexer import SolidityLexer
 from solidityparser.SolidityParser import SolidityParser
 
-def get_entropy(contract_path, use_cache):
+def get_entropy(contract_path, use_cache, first=None):
     if use_cache == False:
         options = '-ENTROPY -BACKOFF -TEST -FILES'
     else:

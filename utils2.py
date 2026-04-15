@@ -1,5 +1,6 @@
 import logging, pickle
 import random, shutil, solcx
+import solidityparser_compat
 from smartBugs import *
 from similarity_compute import *
 from entropy_compute import get_entropy
@@ -33,16 +34,12 @@ def get_one(path_code, path_ast):
     name_list = [name for name in os.listdir(path_code) if name.endswith('.sol')]
     for name in name_list:
         function_file = os.path.join(path_code, name)
-        tree = SolidityParser(CommonTokenStream(SolidityLexer(FileStream(function_file)))).functionDefinition()
-        output = tree.toCodeSequence()
-        regex = r'(\[)[0-9\s]*(\])'
-        output2 = re.sub(regex, '', output)
-        output3 = output2.split(' ')
-        code_tokens_list = [token for token in output3 if token != '' and token != '<EOF>']
-        in_code = code_tokens_list
+        with open(function_file) as f_code:
+            code_token_seq = f_code.read()
+        in_code = [token for token in code_token_seq.split(' ') if token != '']
         with open(os.path.join(path_ast, name)) as f:
             ast_token_seq = f.read()
-        in_ast = ast_token_seq.split(' ')
+        in_ast = [token for token in ast_token_seq.split(' ') if token != '']
         addr = name.rstrip('.sol')
         yield in_code, in_ast, addr
 

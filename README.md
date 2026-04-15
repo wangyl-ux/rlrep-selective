@@ -46,35 +46,14 @@ pip install -r requirements.txt
 - data for pretraining: `pretrain/` and `pretrain_label/`
 - data for validation: `validation/`
 
-4. Add new methods
+4. ANTLR compatibility
 
-Enter the `antlr4` package and find the `RuleContext.py` and `Trees.py` (Some IDEs such as PyCharm can implement this process).
+This repository already includes `solidityparser_compat.py`, which adds the
+required `toCodeSequence()` compatibility at runtime. You do not need to edit
+the installed `antlr4` package manually.
 
-Add the method code below in the `RuleContext` class in `RuleContext.py`.
-```
-def toCodeSequence(self, ruleNames:list=None, recog:Parser=None):
-    return Trees.toCodeSequence(self, ruleNames=ruleNames, recog=recog)
-```
-
-Add the method code below in the `Trees` class in `Trees.py`.
-```
-@classmethod
-def toCodeSequence(cls, t:Tree, ruleNames:list=None, recog:Parser=None):
-    if recog is not None:
-        ruleNames = recog.ruleNames
-    s = escapeWhitespace(cls.getNodeText(t, ruleNames), False)
-    if t.getChildCount()==0:
-        return s
-    with StringIO() as buf:
-        buf.write(s)
-        buf.write(' ')
-        for i in range(0, t.getChildCount()):
-            if i > 0:
-                buf.write(' ')
-            buf.write(cls.toCodeSequence(t.getChild(i), ruleNames))
-  
-        return buf.getvalue()
-```
+Use `antlr4-python3-runtime==4.7.2`, because the generated parser under
+`solidityparser/` was built with ANTLR 4.7.2.
 
 
 5. training and validation
@@ -90,4 +69,18 @@ python main.py mutation dataset_vul/newALLBUGS
 6. result
 
 At last, result can be got in `dataset_vul/newALLBUGS/validation/result/`.
+
+## Shared server notes
+
+For a shared server without `sudo`, create and use your own virtual environment:
+
+```shell
+python3 -m venv rlrep
+source rlrep/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+This keeps all Python packages in your own home directory and avoids modifying
+the global environment used by others.
 
