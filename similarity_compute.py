@@ -8,9 +8,17 @@ from solidityparser.SolidityLexer import SolidityLexer
 from solidityparser.SolidityParser import SolidityParser
 
 
-loading = False
-if loading:
-    model = FastText.load("FastText/fasttext50/fasttext.model")
+model = None
+
+
+def get_fasttext_model():
+    global model
+    if model is None:
+        model_path = "FastText/fasttext50/fasttext.model"
+        if not os.path.exists(model_path):
+            raise FileNotFoundError("FastText model not found: {}".format(model_path))
+        model = FastText.load(model_path)
+    return model
 
 def get3TokenSeq(path1, path2):
     with open(path1) as f:
@@ -36,11 +44,13 @@ def getLineVector(line, dimension):
     token_list = line.strip('\n').split(' ')
     vector = np.zeros((dimension,), dtype="float64")
     token_num = 0
-    global model
+    model = get_fasttext_model()
     for token in token_list:
         if token in model:
             token_num += 1
             vector = np.add(vector, model[token])
+    if token_num == 0:
+        return np.zeros((1, dimension), dtype="float64")
     lineVector = np.array([vector]) / token_num
     return lineVector
 
