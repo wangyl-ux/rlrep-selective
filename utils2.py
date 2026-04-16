@@ -133,11 +133,12 @@ def fitness_function2(original_contract, repair_contract) -> float:
     cache = True
     original_entropy = get_entropy(original_contract, cache, first=False)
     repair_entropy = get_entropy(repair_contract, cache, first=False)
-    detail['entropy_used'] = 1
-    if abs(original_entropy - 3.2) > abs(repair_entropy - 3.2):
-        reward += 0.014
-    else:
-        reward -= 0.014     
+    if original_entropy != -9999 and repair_entropy != -9999:
+        detail['entropy_used'] = 1
+        if abs(original_entropy - 3.2) > abs(repair_entropy - 3.2):
+            reward += 0.014
+        else:
+            reward -= 0.014
     if reward > 1:
         reward = 1
     if reward == 0.0:

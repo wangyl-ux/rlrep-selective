@@ -13,9 +13,9 @@ def get_entropy(contract_path, use_cache, first=None):
         options = '-ENTROPY -BACKOFF -TEST -CACHE -CACHE_ORDER 3 -CACHE_DYNAMIC_LAMBDA -FILE_CACHE -FILES'
     # options_window5000 = '-ENTROPY -BACKOFF -TEST -CACHE -CACHE_ORDER 3 -CACHE_DYNAMIC_LAMBDA -WINDOW_CACHE -WINDOW_SIZE 5000 -FILES'
 
-    completion = 'entropy_compute/code/completion'
-    scope_file = 'entropy_compute/data/trainset/fold0.train.scope'
-    grams_file = 'entropy_compute/data/trainset/fold0.train.3grams'  # n-grams file
+    completion = os.path.abspath('entropy_compute/code/completion')
+    scope_file = os.path.abspath('entropy_compute/data/trainset/fold0.train.scope')
+    grams_file = os.path.abspath('entropy_compute/data/trainset/fold0.train.3grams')  # n-grams file
 
     tmp_dir = "dataset_vul/newALLBUGS/tmp/tmp_function/"
     tmp_test = "dataset_vul/newALLBUGS/tmp/test_function/"
@@ -52,11 +52,16 @@ def get_entropy(contract_path, use_cache, first=None):
         f2.write(tmp_path)
 
     # compute entropy
+    if not os.path.exists(completion) or not os.access(completion, os.X_OK):
+        return -9999
     order = 3
-    cp2 = subprocess.run('{} {} -NGRAM_FILE {} -NGRAM_ORDER {} -SCOPE_FILE {} -INPUT_FILE {}'.format
-                         (completion, options, grams_file, order, scope_file, test_file), shell=True, stdout=subprocess.PIPE)
+    cp2 = subprocess.run(
+        [completion] + options.split() + ['-NGRAM_FILE', grams_file, '-NGRAM_ORDER', str(order), '-SCOPE_FILE', scope_file, '-INPUT_FILE', test_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     if cp2.returncode:
-        raise (IOError, 'code/completion fail')
+        return -9999
     lines = cp2.stdout.decode().split('\n')
     for line in lines:
         if 'Entropy: ' in line:
