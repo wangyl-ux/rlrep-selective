@@ -83,8 +83,9 @@ def exec_cmd(args: argparse.Namespace, ltime):
     p.start()
     p.join(ltime)
     if p.is_alive():
-        print("pass time")
+        print("pass time: tool={} file={}".format(tasks[0][0], tasks[0][1]))
         p.terminate()
+        p.join()
         sleeptime.sleep(0.1)
         return {}
     contract_inspection_reuslts = pipi[1].recv()

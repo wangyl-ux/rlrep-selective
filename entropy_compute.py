@@ -21,13 +21,19 @@ def get_entropy(contract_path, use_cache, first=None):
     tmp_test = "dataset_vul/newALLBUGS/tmp/test_function/"
     os.makedirs(tmp_dir, exist_ok=True)
     os.makedirs(tmp_test, exist_ok=True)
-    parser_js = "solidity-extractor/function.js"
+    parser_js = os.path.abspath("solidity-extractor/function.js")
+    abs_contract_path = os.path.abspath(contract_path)
 
-    cp = subprocess.run("cd {} && node ../../../../{} {} >/dev/null".format(tmp_dir, parser_js, contract_path), shell=True, stdout=subprocess.PIPE)
+    cp = subprocess.run(
+        ["node", parser_js, abs_contract_path],
+        cwd=tmp_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     if cp.returncode:
         return -9999
-    name = contract_path.split('/')[-1]
-    tmp_path = tmp_dir + name
+    name = os.path.basename(abs_contract_path)
+    tmp_path = os.path.join(tmp_dir, name)
     with open(tmp_path) as f:
         codestring = f.read()
 
@@ -41,7 +47,7 @@ def get_entropy(contract_path, use_cache, first=None):
     with open(tmp_path, 'w') as f:
         f.write(sourceCode)
 
-    test_file = tmp_test + name
+    test_file = os.path.join(tmp_test, name)
     with open(test_file, 'w') as f2:
         f2.write(tmp_path)
 
