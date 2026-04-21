@@ -746,8 +746,8 @@ def choose_action(contract, action_nums, train, gitdif=False) -> float:
                 return rew
 
 def detect(original_contract, repair_contract, limited) -> tuple:
-    error = smart(original_contract, limited)
-    now_error = smart(repair_contract, limited)
+    error = smart(original_contract, limited, use_cache=True)
+    now_error = smart(repair_contract, limited, use_cache=False)
     return error, now_error
 
 
