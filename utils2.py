@@ -1,4 +1,4 @@
-import logging, pickle
+import logging, os, pickle, sys
 import random, shutil, solcx
 import solidityparser_compat
 from smartBugs import *
@@ -9,7 +9,12 @@ LAST_FITNESS_DETAILS = None
 
 
 def get_logger(paths):
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+    logging.getLogger("docker").setLevel(logging.WARNING)
+    logging.getLogger("docker.auth").setLevel(logging.WARNING)
+    logging.getLogger("docker.utils.config").setLevel(logging.WARNING)
     logger = logging.getLogger(__name__)
     fh = logging.FileHandler(paths)
     ch = logging.StreamHandler(sys.stdout)
@@ -111,7 +116,7 @@ def fitness_function2(original_contract, repair_contract) -> float:
     detail['compile_ok'] = 1
     error, now_error = detect(original_contract, repair_contract, 60)
     if error == -1 or now_error == -1:
-        pass
+        reward += float(os.environ.get('RLREP_DETECT_FAIL_PENALTY', '-0.025'))
     else:
         detail['smartbugs_used'] = 1
         if now_error < error:
@@ -127,9 +132,9 @@ def fitness_function2(original_contract, repair_contract) -> float:
     repair_sims = get_similarity(repair_contract, first=False)
     detail['similarity_used'] = 1
     if repair_sims < contract_sims:
-        reward -= 0.014
-    else:
         reward += 0.014
+    else:
+        reward -= 0.014
     cache = True
     original_entropy = get_entropy(original_contract, cache, first=False)
     repair_entropy = get_entropy(repair_contract, cache, first=False)
