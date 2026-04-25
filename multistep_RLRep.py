@@ -202,20 +202,13 @@ class Actor(nn.Module):
             outputs = torch.cat([outputs, tensor], 0)
             for j in range(batch_size):
                 if preds[j][-1] != end_token:
-                    epsilon = random.random()
-                    if epsilon <= 0.8:
-                        action_set = tensor.argmax(-1)
-                        next_action = action_set[0, j]
-                    else:
-                        next_action = torch.LongTensor(random.sample(range(tensor.size(2)), 1))
-                    if i == 0 and next_action == end_token:
-                        tensor = tensor[:, :, :-1]
-                        if epsilon <= 0.8:
-                            action_set = tensor.argmax(-1)
-                            next_action = action_set[0, j]
-                        else:
-                            next_action = torch.LongTensor(random.sample(range(tensor.size(2) - 1), 1))
-                    preds[j].append(int(next_action))
+                    # Old behavior used epsilon-greedy; sample from the model distribution instead.
+                    step_probs = tensor[0, j].clone()
+                    if i == 0:
+                        step_probs[end_token] = 0.0
+                        step_probs = step_probs / step_probs.sum()
+                    next_action = torch.multinomial(step_probs, 1)
+                    preds[j].append(int(next_action.item()))
             tensor = torch.tensor([preds[j][-1] for j in range(batch_size)]).to(device)
         preds = [x[1:] for x in preds]
         preds = [x[:-1] if x[-1] == end_token else x for x in preds]
@@ -411,18 +404,20 @@ class Model(nn.Module):
             rlist.append(res)
         ref_points = torch.tensor(rlist).to(device)
 
+        prob_action = prob_action.to(device)
         ref_points = ref_points.view(1, -1)
-        mask = torch.zeros_like(prob_action).to(device)
+        max_length = max(lengths)
+        selected_actions = torch.zeros((max_length, batch_size), dtype=torch.long, device=device)
+        valid_mask = torch.zeros((max_length, batch_size), dtype=torch.bool, device=device)
         for i in range(batch_size):
             for j in range(lengths[i]):
-                mask[j, i, preds[i][j]] = 1
-        mask = mask.eq(1)
-        prob_action = prob_action.to(device)
-        tensor = torch.where(mask, prob_action, torch.tensor(1e-5).to(device))
-        tensor = tensor.sum(-1)
-        tensor = torch.log(tensor)
-        tensor = tensor * (-ref_points)
-        loss_actor = tensor.sum()
+                selected_actions[j, i] = preds[i][j]
+                valid_mask[j, i] = True
+        # Old behavior used where(...).sum(-1); gather the sampled action probability directly.
+        selected_prob = prob_action.gather(2, selected_actions.unsqueeze(-1)).squeeze(-1)
+        selected_log_prob = torch.log(selected_prob.clamp_min(1e-5))
+        selected_log_prob = torch.where(valid_mask, selected_log_prob, torch.zeros_like(selected_log_prob))
+        loss_actor = -(selected_log_prob * ref_points).sum()
         print('loss:', loss_actor)
         loss_actor = loss_actor / sum(lengths)
         self.optimizer_actor.zero_grad()
@@ -464,15 +459,27 @@ class Model(nn.Module):
             self.optimizer_actor.step()
             return float(loss_actor)
 
-    def save(self, path):
+    def save(self, path, epoch=None, best_positive_repair=None):
         checkpoint = {
             'config': self.config,
-            'actor': self.actor,
-            'optimizer_actor': self.optimizer_actor,
+            # Old behavior stored full modules and optimizer objects.
+            # 'actor': self.actor,
+            # 'optimizer_actor': self.optimizer_actor,
+            'actor_state_dict': self.actor.state_dict(),
+            'optimizer_actor_state_dict': self.optimizer_actor.state_dict(),
+            'epoch': epoch,
+            'best_positive_repair': best_positive_repair,
         }
         torch.save(checkpoint, path)
 
     def load(self, path):
-        checkpoint = torch.load(path)
-        self.actor = checkpoint['actor']
-        self.optimizer_actor = checkpoint['optimizer_actor']
+        checkpoint = torch.load(path, map_location=self.device)
+        if 'actor_state_dict' in checkpoint:
+            self.actor.load_state_dict(checkpoint['actor_state_dict'])
+            self.optimizer_actor.load_state_dict(checkpoint['optimizer_actor_state_dict'])
+        else:
+            # Old checkpoints can still be loaded while we migrate save format.
+            self.actor = checkpoint['actor']
+            self.optimizer_actor = checkpoint['optimizer_actor']
+        self.to(self.device)
+        return checkpoint

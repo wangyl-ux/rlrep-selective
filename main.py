@@ -1,5 +1,8 @@
 from utils2 import *
 from genetic import *
+import os
+import pickle
+import re
 import sys
 
 class Config_RL_multistep:
@@ -47,6 +50,11 @@ def summarize_rewards(epoch, reward_details, logger):
     smartbugs_worse = sum(detail.get('smartbugs_worse', 0) for detail in reward_details)
     similarity_used = sum(detail.get('similarity_used', 0) for detail in reward_details)
     entropy_used = sum(detail.get('entropy_used', 0) for detail in reward_details)
+    compile_reward = sum(detail.get('compile_reward', 0.0) for detail in reward_details)
+    detect_reward = sum(detail.get('detect_reward', 0.0) for detail in reward_details)
+    similarity_reward = sum(detail.get('similarity_reward', 0.0) for detail in reward_details)
+    entropy_reward = sum(detail.get('entropy_reward', 0.0) for detail in reward_details)
+    action_reward = sum(detail.get('action_reward', 0.0) for detail in reward_details)
     positive = sum(1 for reward in rewards if reward > 0)
     zero_or_negative = total - positive
 
@@ -70,8 +78,44 @@ def summarize_rewards(epoch, reward_details, logger):
             epoch, compile_ok, total, compile_ok / total if total else 0.0
         )
     )
+    logger.info(
+        'reward components. epoch: {}. compile: {:.6f}, detect: {:.6f}, similarity: {:.6f}, entropy: {:.6f}, action: {:.6f}'.format(
+            epoch, compile_reward, detect_reward, similarity_reward, entropy_reward, action_reward
+        )
+    )
     logger.info('reward samples. epoch: {}. {}'.format(epoch, sample_text))
+    for detail in reward_details:
+        logger.info(
+            'candidate reward. epoch: {}. contract: {}. total: {:.6f}, compile: {:.6f}, detect: {:.6f}, similarity: {:.6f}, entropy: {:.6f}, action: {:.6f}, status: {}'.format(
+                epoch,
+                detail.get('contract', 'unknown'),
+                detail.get('reward', 0.0),
+                detail.get('compile_reward', 0.0),
+                detail.get('detect_reward', 0.0),
+                detail.get('similarity_reward', 0.0),
+                detail.get('entropy_reward', 0.0),
+                detail.get('action_reward', 0.0),
+                detail.get('status', 'unknown'),
+            )
+        )
     return mean_reward, non_negative
+
+def get_periodic_checkpoint_path(model_dir, model_name, epoch):
+    return os.path.join(model_dir, '{}_train_epoch_{}.pt'.format(model_name, epoch))
+
+def find_latest_train_checkpoint(model_dir, model_name):
+    latest_epoch = -1
+    latest_path = None
+    pattern = re.compile(r'^{}_train_epoch_(\d+)\.pt$'.format(re.escape(model_name)))
+    for name in os.listdir(model_dir):
+        matched = pattern.match(name)
+        if matched is None:
+            continue
+        epoch = int(matched.group(1))
+        if epoch > latest_epoch:
+            latest_epoch = epoch
+            latest_path = os.path.join(model_dir, name)
+    return latest_path, latest_epoch
 
 
 if __name__ == "__main__":
@@ -90,13 +134,21 @@ if __name__ == "__main__":
     config = Config_RL_multistep()
 
     start = -1
+    checkpoint_every = 5
     if model_name == 'multistep_RLRep':
         from multistep_RLRep import *
         in_w2i = (code_w2i, ast_w2i)
         model = Model(config)
         beam_search_use = 5
-        os.makedirs('dataset_vul/newALLBUGS/model', exist_ok=True)
-        if start != -1:
+        model_dir = 'dataset_vul/newALLBUGS/model'
+        os.makedirs(model_dir, exist_ok=True)
+        resume_path, resume_epoch = find_latest_train_checkpoint(model_dir, model_name)
+        if resume_path is not None:
+            checkpoint = model.load(resume_path)
+            start = checkpoint.get('epoch', resume_epoch)
+            best_positive_repair = checkpoint.get('best_positive_repair', best_positive_repair)
+            logger.info('Resume checkpoint: {} (epoch={})'.format(resume_path, start))
+        elif start != -1:
             model.load('dataset_vul/newALLBUGS/model/multistep_RLRep_33')
             model.set_trainer()
 
@@ -108,9 +160,13 @@ if __name__ == "__main__":
                 batch_in1, batch_in2, batch_in3, batch_out = batch
                 loss += model.pretrain(batch[:-2], batch[-1], 'actor')
                 logger.info('Epoch: {}, Batch: {}, Loss: {}'.format(epoch, step, loss / (step + 1)))
-            model.save('dataset_vul/newALLBUGS/model/{}_{}'.format(model_name, epoch))
+            # Old behavior saved a full checkpoint every pretrain epoch.
+            # model.save('dataset_vul/newALLBUGS/model/{}_{}'.format(model_name, epoch))
+            if (epoch + 1) % checkpoint_every == 0:
+                model.save(get_periodic_checkpoint_path(model_dir, model_name, epoch), epoch=epoch, best_positive_repair=best_positive_repair)
 
-        for epoch in range(config.PRE_EPOCH, config.EPOCH):
+        train_start_epoch = max(config.PRE_EPOCH, start + 1)
+        for epoch in range(train_start_epoch, config.EPOCH):
             loss_actor = 0
             loss_critic = 0.
             code_dir = 'dataset_vul/newALLBUGS/threelines-tokenseq'
@@ -142,6 +198,11 @@ if __name__ == "__main__":
                     detail = {
                         'contract': tup[1] + '.sol',
                         'reward': reward,
+                        'compile_reward': 0.0,
+                        'detect_reward': 0.0,
+                        'similarity_reward': 0.0,
+                        'entropy_reward': 0.0,
+                        'action_reward': reward,
                         'compile_ok': 0,
                         'compile_fail': 0,
                         'invalid_action': 1,
@@ -157,6 +218,11 @@ if __name__ == "__main__":
                     detail = {
                         'contract': tup[1] + '.sol',
                         'reward': reward,
+                        'compile_reward': 0.0,
+                        'detect_reward': 0.0,
+                        'similarity_reward': 0.0,
+                        'entropy_reward': 0.0,
+                        'action_reward': 0.0,
                         'compile_ok': 0,
                         'compile_fail': 0,
                         'invalid_action': 0,
@@ -176,11 +242,13 @@ if __name__ == "__main__":
                     positive_repair += 1
             mean_reward, _ = summarize_rewards(epoch, reward_details, logger)
             if positive_repair > best_positive_repair:
-                print('model update. the {0}-th epoch. positive reward / total : {1} / {2}, mean reward: {3:.6f}'.format(epoch, positive_repair, len(names), mean_reward))
                 best_positive_repair = positive_repair
-                model.save('dataset_vul/newALLBUGS/model/{}_{}'.format(model_name, epoch))
+                print('model update. the {0}-th epoch. positive reward / total : {1} / {2}, mean reward: {3:.6f}'.format(epoch, positive_repair, len(names), mean_reward))
+                model.save(os.path.join(model_dir, '{}_{}'.format(model_name, epoch)), epoch=epoch, best_positive_repair=best_positive_repair)
             else:
                 print('model NOT update. the {0}-th epoch. positive reward / total : {1} / {2}, mean reward: {3:.6f}'.format(epoch, positive_repair, len(names), mean_reward))
+            if (epoch + 1) % checkpoint_every == 0:
+                model.save(get_periodic_checkpoint_path(model_dir, model_name, epoch), epoch=epoch, best_positive_repair=best_positive_repair)
 
                 
     if model_name == 'mutation':

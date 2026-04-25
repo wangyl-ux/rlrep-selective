@@ -1,4 +1,4 @@
-import logging, os, pickle, sys
+import hashlib, logging, os, pickle, sys
 import random, shutil, solcx
 import solidityparser_compat
 from smartBugs import *
@@ -6,6 +6,8 @@ from similarity_compute import *
 from entropy_compute import get_entropy
 
 LAST_FITNESS_DETAILS = None
+SIMILARITY_CACHE = {}
+ENTROPY_CACHE = {}
 
 
 def get_logger(paths):
@@ -74,12 +76,33 @@ def get_batch(path_code, path_ast, config, in_w2i, pretrain):
         else:
             yield batch_in1, batch_in2, batch_in3
 
+def get_code_cache_key(prefix, contract_code):
+    # Cache deterministic reward helpers by code content instead of temp file path.
+    return '{}:{}'.format(prefix, hashlib.sha1(contract_code.encode('utf-8')).hexdigest())
+
+def get_similarity_cached(contract_path, contract_code):
+    key = get_code_cache_key('similarity', contract_code)
+    if key not in SIMILARITY_CACHE:
+        SIMILARITY_CACHE[key] = get_similarity(contract_path, first=False)
+    return SIMILARITY_CACHE[key]
+
+def get_entropy_cached(contract_path, contract_code, use_cache):
+    key = get_code_cache_key('entropy:{}'.format(int(use_cache)), contract_code)
+    if key not in ENTROPY_CACHE:
+        ENTROPY_CACHE[key] = get_entropy(contract_path, use_cache, first=False)
+    return ENTROPY_CACHE[key]
+
 def fitness_function2(original_contract, repair_contract) -> float:
     global LAST_FITNESS_DETAILS
     reward = 0
     detail = {
         'contract': os.path.basename(repair_contract),
         'reward': 0.0,
+        'compile_reward': 0.0,
+        'detect_reward': 0.0,
+        'similarity_reward': 0.0,
+        'entropy_reward': 0.0,
+        'action_reward': 0.0,
         'compile_ok': 0,
         'compile_fail': 0,
         'smartbugs_used': 0,
@@ -89,6 +112,7 @@ def fitness_function2(original_contract, repair_contract) -> float:
         'similarity_used': 0,
         'entropy_used': 0,
         'invalid_action': 0,
+        'detect_skipped': 0,
         'status': 'unknown',
     }
     with open(repair_contract) as f:
@@ -106,6 +130,7 @@ def fitness_function2(original_contract, repair_contract) -> float:
         solcx.compile_files(repair_contract, solc_version=version)
     except:
         reward -= 0.02
+        detail['compile_reward'] = -0.02
         detail['compile_fail'] = 1
         detail['status'] = 'compile_fail'
         detail['reward'] = reward
@@ -115,35 +140,41 @@ def fitness_function2(original_contract, repair_contract) -> float:
         return reward
     detail['compile_ok'] = 1
     error, now_error = detect(original_contract, repair_contract, 60)
+    # Old behavior penalized incomplete detection; the paper skips this score.
+    # reward += float(os.environ.get('RLREP_DETECT_FAIL_PENALTY', '-0.025'))
     if error == -1 or now_error == -1:
-        reward += float(os.environ.get('RLREP_DETECT_FAIL_PENALTY', '-0.025'))
+        detail['detect_skipped'] = 1
     else:
         detail['smartbugs_used'] = 1
         if now_error < error:
-            reward += 0.025
+            detail['detect_reward'] = 0.025
+            reward += detail['detect_reward']
             detail['smartbugs_improve'] = 1
         else:
             if now_error == error:
                 detail['smartbugs_equal'] = 1
             else:
                 detail['smartbugs_worse'] = 1
-            reward -= 0.025
-    contract_sims = get_similarity(original_contract, first=False)
-    repair_sims = get_similarity(repair_contract, first=False)
+            detail['detect_reward'] = -0.025
+            reward += detail['detect_reward']
+    contract_sims = get_similarity_cached(original_contract, original_contract_code)
+    repair_sims = get_similarity_cached(repair_contract, repair_contract_code)
     detail['similarity_used'] = 1
     if repair_sims < contract_sims:
-        reward += 0.014
+        detail['similarity_reward'] = 0.014
     else:
-        reward -= 0.014
+        detail['similarity_reward'] = -0.014
+    reward += detail['similarity_reward']
     cache = True
-    original_entropy = get_entropy(original_contract, cache, first=False)
-    repair_entropy = get_entropy(repair_contract, cache, first=False)
+    original_entropy = get_entropy_cached(original_contract, original_contract_code, cache)
+    repair_entropy = get_entropy_cached(repair_contract, repair_contract_code, cache)
     if original_entropy != -9999 and repair_entropy != -9999:
         detail['entropy_used'] = 1
         if abs(original_entropy - 3.2) > abs(repair_entropy - 3.2):
-            reward += 0.014
+            detail['entropy_reward'] = 0.014
         else:
-            reward -= 0.014
+            detail['entropy_reward'] = -0.014
+        reward += detail['entropy_reward']
     if reward > 1:
         reward = 1
     if reward == 0.0:
@@ -297,12 +328,13 @@ def write_newlines(repair_path, wlines):
             rf.write(line)
 
 def replace_random(line, str1, str2):
-    if len(str1) is 1:
+    # Old behavior used `is`, which breaks operator matching on Python strings.
+    if len(str1) == 1:
         i = 0
         matchs = []
         while i < len(line):
-            if line[i] is str1:
-                if line[i+1] is str1:
+            if line[i] == str1:
+                if line[i+1] == str1:
                     i += 2
                     continue
                 else:
@@ -312,11 +344,11 @@ def replace_random(line, str1, str2):
         _newline = line[:index] + str2 + line[index+1:]
         return _newline
 
-    elif len(str1) is 2:
+    elif len(str1) == 2:
         i = 0
         matchs = []
         while i < len(line):
-            if line[i] is str1[0] and line[i+1] is str1[1]:
+            if line[i] == str1[0] and line[i+1] == str1[1]:
                 matchs.append(i)
                 i += 2
             else:
@@ -750,7 +782,7 @@ def choose_action(contract, action_nums, train, gitdif=False) -> float:
                 rew = fitness_function2(contract_path, repair_path)
                 return rew
 
-def detect(original_contract, repair_contract, limited) -> tuple:
+def detect(original_contract, repair_contract, limited, trainset=None) -> tuple:
     error = smart(original_contract, limited, use_cache=True)
     now_error = smart(repair_contract, limited, use_cache=False)
     return error, now_error

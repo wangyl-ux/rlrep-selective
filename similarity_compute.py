@@ -9,6 +9,7 @@ from solidityparser.SolidityParser import SolidityParser
 
 
 model = None
+bug_embeddings = None
 
 
 def get_fasttext_model():
@@ -19,6 +20,22 @@ def get_fasttext_model():
             raise FileNotFoundError("FastText model not found: {}".format(model_path))
         model = FastText.load(model_path)
     return model
+
+def get_bug_embeddings():
+    global bug_embeddings
+    if bug_embeddings is None:
+        # Cache the embedding corpus once because reward evaluation is very hot.
+        bug_embeddings = []
+        for bt in [0, 1, 2, 3, 4]:
+            context1_npy_path = "FastText/bugEmbedding/{}context1.npy".format(bt)
+            bug_npy_path = "FastText/bugEmbedding/{}bug.npy".format(bt)
+            context2_npy_path = "FastText/bugEmbedding/{}context2.npy".format(bt)
+            bug_embeddings.append((
+                np.load(context1_npy_path),
+                np.load(bug_npy_path),
+                np.load(context2_npy_path),
+            ))
+    return bug_embeddings
 
 def get3TokenSeq(path1, path2):
     with open(path1) as f:
@@ -61,18 +78,12 @@ def getSimilarity(v, e):
 
 def get_similarity(contract_code_path, first=None):
     five_list = []
-    bts = [0, 1, 2, 3, 4]
-    for bt in bts:
+    for bt, embedding_group in enumerate(get_bug_embeddings()):
         tmp_dir = "dataset_vul/newALLBUGS/tmp/tmp_tokenseq3/"
         os.makedirs(tmp_dir, exist_ok=True)
-        context1_npy_path = "FastText/bugEmbedding/{}context1.npy".format(bt)
-        bug_npy_path = "FastText/bugEmbedding/{}bug.npy".format(bt)
-        context2_npy_path = "FastText/bugEmbedding/{}context2.npy".format(bt)
-        context1_npy = np.load(context1_npy_path)
-        bug_npy = np.load(bug_npy_path)
-        context2_npy = np.load(context2_npy_path)
+        context1_npy, bug_npy, context2_npy = embedding_group
 
-        tmp_3tokenseq_path = tmp_dir + contract_code_path.split('/')[-1]
+        tmp_3tokenseq_path = os.path.join(tmp_dir, os.path.basename(contract_code_path))
         get3TokenSeq(contract_code_path, tmp_3tokenseq_path)
         with open(tmp_3tokenseq_path) as tf:
             threelines = tf.readlines()
