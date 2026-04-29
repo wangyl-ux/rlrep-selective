@@ -158,21 +158,31 @@ def parse_results(output, tool, file_name, container, cfg, logs, results_folder,
         elif tool == 'securify':
             if len(output) > 0 and output[0] == '{':
                 results['analysis'] = json.loads(output)
+                sarif_holder.addRun(Securify().parseSarif(results, file_path_in_repo))
             elif os.path.exists(os.path.join(output_folder, 'result.tar')):
-                tar = tarfile.open(os.path.join(output_folder, 'result.tar'))
-                try:
-                    output_file = tar.extractfile('results/results.json')
-                    results['analysis'] = json.loads(output_file.read())
-                    sarif_holder.addRun(Securify().parseSarif(results, file_path_in_repo))
-                except Exception as e:
-                    print('pas terrible')
-                    output_file = tar.extractfile('results/live.json')
-                    results['analysis'] = {
-                        file_name: {
-                            'results': json.loads(output_file.read())["patternResults"]
+                with tarfile.open(os.path.join(output_folder, 'result.tar')) as tar:
+                    tar_names = {member.name for member in tar.getmembers()}
+                    # Old behavior used a broad try/except and could hide the real missing file.
+                    if 'results/results.json' in tar_names:
+                        output_file = tar.extractfile('results/results.json')
+                        results['analysis'] = json.loads(output_file.read())
+                        sarif_holder.addRun(Securify().parseSarif(results, file_path_in_repo))
+                    # Old fallback:
+                    # output_file = tar.extractfile('results/live.json')
+                    elif 'results/live.json' in tar_names:
+                        output_file = tar.extractfile('results/live.json')
+                        results['analysis'] = {
+                            file_name: {
+                                'results': json.loads(output_file.read())["patternResults"]
+                            }
                         }
-                    }
-                    sarif_holder.addRun(Securify().parseSarifFromLiveJson(results, file_path_in_repo))
+                        sarif_holder.addRun(Securify().parseSarifFromLiveJson(results, file_path_in_repo))
+                    else:
+                        raise FileNotFoundError(
+                            'securify result archive missing expected json output: {}'.format(
+                                ', '.join(sorted(tar_names))
+                            )
+                        )
         elif tool == 'slither':
             if os.path.exists(os.path.join(output_folder, 'result.tar')):
                 tar = tarfile.open(os.path.join(output_folder, 'result.tar'))

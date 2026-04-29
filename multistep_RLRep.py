@@ -418,11 +418,13 @@ class Model(nn.Module):
         selected_log_prob = torch.log(selected_prob.clamp_min(1e-5))
         selected_log_prob = torch.where(valid_mask, selected_log_prob, torch.zeros_like(selected_log_prob))
         loss_actor = -(selected_log_prob * ref_points).sum()
-        print('loss:', loss_actor)
+        # Old debug print kept flooding the training log.
+        # print('loss:', loss_actor)
         loss_actor = loss_actor / sum(lengths)
         self.optimizer_actor.zero_grad()
         loss_actor.backward()
-        nn.utils.clip_grad_norm(self.actor.parameters(), max_norm=20, norm_type=2)
+        # Use the in-place API to match current PyTorch and remove the deprecation warning.
+        nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=20, norm_type=2)
         self.optimizer_actor.step()
         return float(loss_actor)
 
