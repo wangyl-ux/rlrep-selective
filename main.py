@@ -1,5 +1,6 @@
 from utils2 import *
 from genetic import *
+from collections import Counter
 import os
 import pickle
 import re
@@ -48,6 +49,9 @@ def summarize_rewards(epoch, reward_details, logger):
     smartbugs_improve = sum(detail.get('smartbugs_improve', 0) for detail in reward_details)
     smartbugs_equal = sum(detail.get('smartbugs_equal', 0) for detail in reward_details)
     smartbugs_worse = sum(detail.get('smartbugs_worse', 0) for detail in reward_details)
+    detect_skipped = sum(detail.get('detect_skipped', 0) for detail in reward_details)
+    detect_original_fail = sum(detail.get('detect_original_fail', 0) for detail in reward_details)
+    detect_repair_fail = sum(detail.get('detect_repair_fail', 0) for detail in reward_details)
     similarity_used = sum(detail.get('similarity_used', 0) for detail in reward_details)
     entropy_used = sum(detail.get('entropy_used', 0) for detail in reward_details)
     compile_reward = sum(detail.get('compile_reward', 0.0) for detail in reward_details)
@@ -57,6 +61,39 @@ def summarize_rewards(epoch, reward_details, logger):
     action_reward = sum(detail.get('action_reward', 0.0) for detail in reward_details)
     positive = sum(1 for reward in rewards if reward > 0)
     zero_or_negative = total - positive
+    original_fail_tools = Counter()
+    repair_fail_tools = Counter()
+
+    def format_counter(counter):
+        if not counter:
+            return 'none'
+        return ','.join('{}:{}'.format(key, counter[key]) for key in sorted(counter))
+
+    def format_detect_side(detail, side):
+        status = detail.get('detect_{}_status'.format(side), '') or 'none'
+        tool = detail.get('detect_{}_tool'.format(side), '')
+        reason = detail.get('detect_{}_reason'.format(side), '')
+        if tool and reason:
+            return '{}({}:{})'.format(status, tool, reason)
+        if tool:
+            return '{}({})'.format(status, tool)
+        if reason:
+            return '{}({})'.format(status, reason)
+        return status
+
+    for detail in reward_details:
+        if detail.get('detect_original_fail', 0):
+            key = '{}:{}'.format(
+                detail.get('detect_original_tool', '') or 'unknown',
+                detail.get('detect_original_reason', '') or 'unknown',
+            )
+            original_fail_tools[key] += 1
+        if detail.get('detect_repair_fail', 0):
+            key = '{}:{}'.format(
+                detail.get('detect_repair_tool', '') or 'unknown',
+                detail.get('detect_repair_reason', '') or 'unknown',
+            )
+            repair_fail_tools[key] += 1
 
     samples = []
     for detail in reward_details[:6]:
@@ -74,6 +111,16 @@ def summarize_rewards(epoch, reward_details, logger):
         )
     )
     logger.info(
+        'detect skipped. epoch: {}. total: {}, original_fail: {}, repair_fail: {}, original_tool_fail: {}, repair_tool_fail: {}'.format(
+            epoch,
+            detect_skipped,
+            detect_original_fail,
+            detect_repair_fail,
+            format_counter(original_fail_tools),
+            format_counter(repair_fail_tools),
+        )
+    )
+    logger.info(
         'compile pass rate. epoch: {}. {}/{} = {:.4f}'.format(
             epoch, compile_ok, total, compile_ok / total if total else 0.0
         )
@@ -86,7 +133,7 @@ def summarize_rewards(epoch, reward_details, logger):
     logger.info('reward samples. epoch: {}. {}'.format(epoch, sample_text))
     for detail in reward_details:
         logger.info(
-            'candidate reward. epoch: {}. contract: {}. total: {:.6f}, compile: {:.6f}, detect: {:.6f}, similarity: {:.6f}, entropy: {:.6f}, action: {:.6f}, status: {}'.format(
+            'candidate reward. epoch: {}. contract: {}. total: {:.6f}, compile: {:.6f}, detect: {:.6f}, similarity: {:.6f}, entropy: {:.6f}, action: {:.6f}, status: {}, detect_skip: {}, original_detect: {}, repair_detect: {}'.format(
                 epoch,
                 detail.get('contract', 'unknown'),
                 detail.get('reward', 0.0),
@@ -96,6 +143,9 @@ def summarize_rewards(epoch, reward_details, logger):
                 detail.get('entropy_reward', 0.0),
                 detail.get('action_reward', 0.0),
                 detail.get('status', 'unknown'),
+                detail.get('detect_skipped', 0),
+                format_detect_side(detail, 'original'),
+                format_detect_side(detail, 'repair'),
             )
         )
     return mean_reward, non_negative
@@ -206,6 +256,15 @@ if __name__ == "__main__":
                         'compile_ok': 0,
                         'compile_fail': 0,
                         'invalid_action': 1,
+                        'detect_skipped': 0,
+                        'detect_original_fail': 0,
+                        'detect_repair_fail': 0,
+                        'detect_original_tool': '',
+                        'detect_original_reason': '',
+                        'detect_original_status': '',
+                        'detect_repair_tool': '',
+                        'detect_repair_reason': '',
+                        'detect_repair_status': '',
                         'smartbugs_used': 0,
                         'smartbugs_improve': 0,
                         'smartbugs_equal': 0,
@@ -226,6 +285,15 @@ if __name__ == "__main__":
                         'compile_ok': 0,
                         'compile_fail': 0,
                         'invalid_action': 0,
+                        'detect_skipped': 0,
+                        'detect_original_fail': 0,
+                        'detect_repair_fail': 0,
+                        'detect_original_tool': '',
+                        'detect_original_reason': '',
+                        'detect_original_status': '',
+                        'detect_repair_tool': '',
+                        'detect_repair_reason': '',
+                        'detect_repair_status': '',
                         'smartbugs_used': 0,
                         'smartbugs_improve': 0,
                         'smartbugs_equal': 0,

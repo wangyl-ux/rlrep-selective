@@ -432,13 +432,19 @@ class Model(nn.Module):
         self.eval()
         config = self.config
         end_token = config.END_TOKEN
-        preds = self.actor.translate(inputs)
+        # Validation/inference should not build autograd graphs.
+        # preds = self.actor.translate(inputs)
+        with torch.inference_mode():
+            preds = self.actor.translate(inputs)
         preds = [x[:-1] if x[-1] == end_token else x for x in preds]
         return preds
 
     def beam_search(self, inputs, size):
         self.eval()
-        _, best_preds = self.actor.beam_search(inputs, size)
+        # Beam search is inference-only; disable grad tracking to reduce GPU memory.
+        # _, best_preds = self.actor.beam_search(inputs, size)
+        with torch.inference_mode():
+            _, best_preds = self.actor.beam_search(inputs, size)
         return best_preds
 
     def pretrain(self, inputs, targets, mode):

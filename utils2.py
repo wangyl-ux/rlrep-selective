@@ -6,6 +6,7 @@ from similarity_compute import *
 from entropy_compute import get_entropy
 
 LAST_FITNESS_DETAILS = None
+LAST_DETECT_DETAILS = None
 SIMILARITY_CACHE = {}
 ENTROPY_CACHE = {}
 
@@ -113,6 +114,14 @@ def fitness_function2(original_contract, repair_contract) -> float:
         'entropy_used': 0,
         'invalid_action': 0,
         'detect_skipped': 0,
+        'detect_original_fail': 0,
+        'detect_repair_fail': 0,
+        'detect_original_tool': '',
+        'detect_original_reason': '',
+        'detect_original_status': '',
+        'detect_repair_tool': '',
+        'detect_repair_reason': '',
+        'detect_repair_status': '',
         'status': 'unknown',
     }
     with open(repair_contract) as f:
@@ -140,10 +149,23 @@ def fitness_function2(original_contract, repair_contract) -> float:
         return reward
     detail['compile_ok'] = 1
     error, now_error = detect(original_contract, repair_contract, 60)
+    detect_detail = LAST_DETECT_DETAILS or {}
+    original_detect = detect_detail.get('original') or {}
+    repair_detect = detect_detail.get('repair') or {}
+    detail['detect_original_status'] = original_detect.get('status', '')
+    detail['detect_original_tool'] = original_detect.get('failed_tool', '')
+    detail['detect_original_reason'] = original_detect.get('failed_reason', '')
+    detail['detect_repair_status'] = repair_detect.get('status', '')
+    detail['detect_repair_tool'] = repair_detect.get('failed_tool', '')
+    detail['detect_repair_reason'] = repair_detect.get('failed_reason', '')
     # Old behavior penalized incomplete detection; the paper skips this score.
     # reward += float(os.environ.get('RLREP_DETECT_FAIL_PENALTY', '-0.025'))
     if error == -1 or now_error == -1:
         detail['detect_skipped'] = 1
+        if error == -1:
+            detail['detect_original_fail'] = 1
+        if now_error == -1:
+            detail['detect_repair_fail'] = 1
     else:
         detail['smartbugs_used'] = 1
         if now_error < error:
@@ -189,6 +211,12 @@ def get_last_fitness_details():
     if LAST_FITNESS_DETAILS is None:
         return None
     return dict(LAST_FITNESS_DETAILS)
+
+
+def get_last_detect_details():
+    if LAST_DETECT_DETAILS is None:
+        return None
+    return dict(LAST_DETECT_DETAILS)
 
 def get_action():
     action_map = [
@@ -783,8 +811,15 @@ def choose_action(contract, action_nums, train, gitdif=False) -> float:
                 return rew
 
 def detect(original_contract, repair_contract, limited, trainset=None) -> tuple:
+    global LAST_DETECT_DETAILS
     error = smart(original_contract, limited, use_cache=True)
+    original_detail = get_last_smart_details()
     now_error = smart(repair_contract, limited, use_cache=False)
+    repair_detail = get_last_smart_details()
+    LAST_DETECT_DETAILS = {
+        'original': original_detail,
+        'repair': repair_detail,
+    }
     return error, now_error
 
 
