@@ -6,6 +6,9 @@ import torch.nn.functional as F
 from utils2 import *
 import random
 
+# PyTorch 1.8 does not provide inference_mode; fall back to no_grad for compatibility.
+INFERENCE_CONTEXT = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
+
 
 class Encoder(nn.Module):
     def __init__(self, config):
@@ -434,7 +437,7 @@ class Model(nn.Module):
         end_token = config.END_TOKEN
         # Validation/inference should not build autograd graphs.
         # preds = self.actor.translate(inputs)
-        with torch.inference_mode():
+        with INFERENCE_CONTEXT():
             preds = self.actor.translate(inputs)
         preds = [x[:-1] if x[-1] == end_token else x for x in preds]
         return preds
@@ -443,7 +446,7 @@ class Model(nn.Module):
         self.eval()
         # Beam search is inference-only; disable grad tracking to reduce GPU memory.
         # _, best_preds = self.actor.beam_search(inputs, size)
-        with torch.inference_mode():
+        with INFERENCE_CONTEXT():
             _, best_preds = self.actor.beam_search(inputs, size)
         return best_preds
 
