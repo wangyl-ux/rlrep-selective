@@ -37,6 +37,34 @@ def _read_tar_json(tar, member_name):
         raise FileNotFoundError('tar member exists but cannot be read: {}'.format(member_name))
     return json.loads(output_file.read())
 
+
+def _read_tar_text(tar, member_name):
+    output_file = tar.extractfile(member_name)
+    if output_file is None:
+        raise FileNotFoundError('tar member exists but cannot be read: {}'.format(member_name))
+    return output_file.read().decode('utf-8', errors='ignore')
+
+
+def _extract_sailfish_tod_entries_from_log(log_text):
+    pattern = re.compile(
+        r'TOD dependency detected .*? by composing functions ([^\s]+) and ([^\s]+)'
+    )
+    entries = []
+    seen_pairs = set()
+    for first_function, second_function in pattern.findall(log_text):
+        pair = (first_function, second_function)
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        entries.append({
+            'attack_type': 'TOD',
+            'First_function': first_function,
+            'Second_function': second_function,
+            'composed_functions': [second_function, first_function],
+            'dependencies': [],
+        })
+    return entries
+
 """
 get solidity compiler version
 """
@@ -201,23 +229,53 @@ def parse_results(output, tool, file_name, container, cfg, logs, results_folder,
                 raise FileNotFoundError('sailfish result.tar not found at {}'.format(tar_path))
             with tarfile.open(tar_path) as tar:
                 tar_names = {member.name for member in tar.getmembers()}
-                dependency_member = 'results/{}/dependency_info.json'.format(file_name)
-                tod_member = 'results/{}/tod_path_info.json'.format(file_name)
-                dao_member = 'results/{}/dao_path_info.json'.format(file_name)
-                required_members = [dependency_member, tod_member, dao_member]
-                missing_members = [name for name in required_members if name not in tar_names]
-                if missing_members:
-                    raise FileNotFoundError(
-                        'sailfish result archive missing expected output: missing={} available={}'.format(
-                            ', '.join(missing_members),
-                            ', '.join(sorted(tar_names))
-                        )
-                    )
-                results['analysis'] = {
-                    'dependency_info': _read_tar_json(tar, dependency_member),
-                    'tod_path_info': _read_tar_json(tar, tod_member),
-                    'dao_path_info': _read_tar_json(tar, dao_member),
+                result_prefix = 'results/{}/'.format(file_name)
+                dependency_member = result_prefix + 'dependency_info.json'
+                tod_member = result_prefix + 'tod_path_info.json'
+                dao_member = result_prefix + 'dao_path_info.json'
+                contractlint_member = result_prefix + 'contractlint.log'
+                symex_members = sorted(
+                    name for name in tar_names
+                    if name.startswith(result_prefix + 'tod_symex_path_') and name.endswith('.json')
+                )
+
+                analysis = {
+                    'count_source': '',
+                    'symex_path_count': len(symex_members),
                 }
+
+                if dependency_member in tar_names:
+                    analysis['dependency_info'] = _read_tar_json(tar, dependency_member)
+                    analysis['count_source'] = 'dependency_info'
+                else:
+                    if contractlint_member not in tar_names:
+                        raise FileNotFoundError(
+                            'sailfish result archive missing dependency_info.json and contractlint.log: available={}'.format(
+                                ', '.join(sorted(tar_names))
+                            )
+                        )
+                    contractlint_log = _read_tar_text(tar, contractlint_member)
+                    contractlint_entries = _extract_sailfish_tod_entries_from_log(contractlint_log)
+                    if not contractlint_entries:
+                        raise FileNotFoundError(
+                            'sailfish dependency_info.json missing and contractlint.log contains no parsable TOD pairs: '
+                            'symex_paths={} available={}'.format(
+                                len(symex_members),
+                                ', '.join(sorted(tar_names))
+                            )
+                        )
+                    analysis['dependency_info'] = {
+                        '__contractlint__': contractlint_entries,
+                    }
+                    analysis['count_source'] = 'contractlint_log'
+                    analysis['contractlint_pair_count'] = len(contractlint_entries)
+
+                if tod_member in tar_names:
+                    analysis['tod_path_info'] = _read_tar_json(tar, tod_member)
+                if dao_member in tar_names:
+                    analysis['dao_path_info'] = _read_tar_json(tar, dao_member)
+
+                results['analysis'] = analysis
                 sarif_holder.addRun(Sailfish().parseSarif(results, file_path_in_repo))
         elif tool == 'slither':
             if os.path.exists(os.path.join(output_folder, 'result.tar')):

@@ -229,6 +229,20 @@ def _parse_sailfish(execution_result):
                 tod_count += 1
 
     counts['TOD'] = tod_count
+    count_source = analysis.get('count_source', 'dependency_info')
+    extra_parts = []
+    if 'contractlint_pair_count' in analysis:
+        extra_parts.append('contractlint_pairs={}'.format(analysis['contractlint_pair_count']))
+    if 'symex_path_count' in analysis:
+        extra_parts.append('symex_paths={}'.format(analysis['symex_path_count']))
+    extra_suffix = ''
+    if extra_parts:
+        extra_suffix = ' ' + ' '.join(extra_parts)
+    print('[detect] tool=sailfish count_source={} tod_count={}{}'.format(
+        count_source,
+        tod_count,
+        extra_suffix,
+    ))
     return True, counts, None
 
 
