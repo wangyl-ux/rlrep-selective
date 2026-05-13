@@ -1,6 +1,6 @@
 docker_image:
   default: holmessherlock/sailfish:latest
-cmd: bash -lc "cd /root/sailfish/code/static_analysis/analysis && python contractlint.py -c {contract} -o /results -r range -p TOD -oo -sv cvc4"
+cmd: bash -lc "mkdir -p /results && cd /root/sailfish/code/static_analysis/analysis && python contractlint.py -c {contract} -o /results -r range -p TOD -oo -sv cvc4"
 output_in_files:
   folder: /results/
 info: Sailfish detects state-inconsistency bugs such as transaction order dependence (TOD).

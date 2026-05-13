@@ -134,6 +134,10 @@ def parse_results(output, tool, file_name, container, cfg, logs, results_folder,
                 for chunk in bits:
                     f.write(chunk)
         except Exception as e:
+            if tool == 'sailfish':
+                raise RuntimeError(
+                    'sailfish failed to export output folder {} from container'.format(output_in_file)
+                ) from e
             # print(output)
             # print(e)
             print('\x1b[1;31m' + 'ERROR: could not get file from container. file not analysed.' + '\x1b[0m')
