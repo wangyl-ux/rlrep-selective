@@ -20,6 +20,7 @@ from src.output_parser.Manticore import Manticore
 from src.output_parser.Mythril import Mythril
 from src.output_parser.Osiris import Osiris
 from src.output_parser.Oyente import Oyente
+from src.output_parser.Sailfish import Sailfish
 from src.output_parser.Securify import Securify
 from src.output_parser.Slither import Slither
 from src.output_parser.Smartcheck import Smartcheck
@@ -28,6 +29,13 @@ from src.output_parser.Solhint import Solhint
 from time import time
 
 client = docker.from_env()
+
+
+def _read_tar_json(tar, member_name):
+    output_file = tar.extractfile(member_name)
+    if output_file is None:
+        raise FileNotFoundError('tar member exists but cannot be read: {}'.format(member_name))
+    return json.loads(output_file.read())
 
 """
 get solidity compiler version
@@ -183,6 +191,30 @@ def parse_results(output, tool, file_name, container, cfg, logs, results_folder,
                                 ', '.join(sorted(tar_names))
                             )
                         )
+        elif tool == 'sailfish':
+            tar_path = os.path.join(output_folder, 'result.tar')
+            if not os.path.exists(tar_path):
+                raise FileNotFoundError('sailfish result.tar not found at {}'.format(tar_path))
+            with tarfile.open(tar_path) as tar:
+                tar_names = {member.name for member in tar.getmembers()}
+                dependency_member = 'results/{}/dependency_info.json'.format(file_name)
+                tod_member = 'results/{}/tod_path_info.json'.format(file_name)
+                dao_member = 'results/{}/dao_path_info.json'.format(file_name)
+                required_members = [dependency_member, tod_member, dao_member]
+                missing_members = [name for name in required_members if name not in tar_names]
+                if missing_members:
+                    raise FileNotFoundError(
+                        'sailfish result archive missing expected output: missing={} available={}'.format(
+                            ', '.join(missing_members),
+                            ', '.join(sorted(tar_names))
+                        )
+                    )
+                results['analysis'] = {
+                    'dependency_info': _read_tar_json(tar, dependency_member),
+                    'tod_path_info': _read_tar_json(tar, tod_member),
+                    'dao_path_info': _read_tar_json(tar, dao_member),
+                }
+                sarif_holder.addRun(Sailfish().parseSarif(results, file_path_in_repo))
         elif tool == 'slither':
             if os.path.exists(os.path.join(output_folder, 'result.tar')):
                 tar = tarfile.open(os.path.join(output_folder, 'result.tar'))
@@ -207,6 +239,8 @@ def parse_results(output, tool, file_name, container, cfg, logs, results_folder,
     except Exception as e:
         # print(output)
         print(e)
+        if tool == 'sailfish':
+            raise
         # ignore
         pass
 

@@ -44,6 +44,14 @@ DETECT_PROFILES = {
             'slither': ('TX', 'ED', 'RE'),
         },
     },
+    'sailfish_tod': {
+        'tools': ['oyente', 'sailfish', 'slither'],
+        'tool_vulns': {
+            'oyente': ('IO',),
+            'sailfish': ('TOD',),
+            'slither': ('TX', 'ED', 'RE'),
+        },
+    },
 }
 SMART_RESULT_CACHE = {}
 LAST_SMART_DETAILS = None
@@ -192,11 +200,44 @@ def _parse_mythril(execution_result):
     return True, counts, None
 
 
+def _parse_sailfish(execution_result):
+    counts = _new_counts()
+    failure_reason = _execution_failure_reason(execution_result)
+    if failure_reason is not None:
+        return False, counts, failure_reason
+    if 'analysis' not in execution_result.keys() or execution_result['analysis'] is None:
+        return False, counts, 'no_analysis'
+
+    analysis = execution_result['analysis']
+    if not isinstance(analysis, dict):
+        raise TypeError('sailfish analysis must be a dict, got {}'.format(type(analysis).__name__))
+    if 'dependency_info' not in analysis:
+        raise KeyError('sailfish analysis missing dependency_info')
+
+    dependency_info = analysis['dependency_info']
+    if not isinstance(dependency_info, dict):
+        raise TypeError('sailfish dependency_info must be a dict, got {}'.format(type(dependency_info).__name__))
+
+    tod_count = 0
+    for _, entries in dependency_info.items():
+        if not isinstance(entries, list):
+            raise TypeError('sailfish dependency_info entries must be a list')
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise TypeError('sailfish dependency entry must be a dict')
+            if entry.get('attack_type') == 'TOD':
+                tod_count += 1
+
+    counts['TOD'] = tod_count
+    return True, counts, None
+
+
 TOOL_PARSERS = {
     'oyente': _parse_oyente,
     'slither': _parse_slither,
     'securify': _parse_securify,
     'mythril': _parse_mythril,
+    'sailfish': _parse_sailfish,
 }
 
 
