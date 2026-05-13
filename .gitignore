@@ -1,3 +1,7 @@
 dataset_vul/
 entropy_compute/
 FastText/
+__pycache__/
+smartbugs_images/
+sailfish_debug/
+*.pyc
