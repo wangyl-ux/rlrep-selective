@@ -65,6 +65,10 @@ def _extract_sailfish_tod_entries_from_log(log_text):
         })
     return entries
 
+
+def _is_sailfish_log_finished(log_text):
+    return 'Analysis finished!' in log_text or 'Analysis finished at:' in log_text
+
 """
 get solidity compiler version
 """
@@ -257,18 +261,25 @@ def parse_results(output, tool, file_name, container, cfg, logs, results_folder,
                     contractlint_log = _read_tar_text(tar, contractlint_member)
                     contractlint_entries = _extract_sailfish_tod_entries_from_log(contractlint_log)
                     if not contractlint_entries:
-                        raise FileNotFoundError(
-                            'sailfish dependency_info.json missing and contractlint.log contains no parsable TOD pairs: '
-                            'symex_paths={} available={}'.format(
-                                len(symex_members),
-                                ', '.join(sorted(tar_names))
+                        if len(symex_members) == 0 and _is_sailfish_log_finished(contractlint_log):
+                            analysis['dependency_info'] = {}
+                            analysis['count_source'] = 'contractlint_log_zero'
+                            analysis['contractlint_pair_count'] = 0
+                        else:
+                            raise FileNotFoundError(
+                                'sailfish dependency_info.json missing and contractlint.log contains no parsable TOD pairs: '
+                                'symex_paths={} finished={} available={}'.format(
+                                    len(symex_members),
+                                    _is_sailfish_log_finished(contractlint_log),
+                                    ', '.join(sorted(tar_names))
+                                )
                             )
-                        )
-                    analysis['dependency_info'] = {
-                        '__contractlint__': contractlint_entries,
-                    }
-                    analysis['count_source'] = 'contractlint_log'
-                    analysis['contractlint_pair_count'] = len(contractlint_entries)
+                    else:
+                        analysis['dependency_info'] = {
+                            '__contractlint__': contractlint_entries,
+                        }
+                        analysis['count_source'] = 'contractlint_log'
+                        analysis['contractlint_pair_count'] = len(contractlint_entries)
 
                 if tod_member in tar_names:
                     analysis['tod_path_info'] = _read_tar_json(tar, tod_member)

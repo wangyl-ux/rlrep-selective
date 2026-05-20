@@ -168,6 +168,69 @@ def find_latest_train_checkpoint(model_dir, model_name):
     return latest_path, latest_epoch
 
 
+def parse_resume_request(argv):
+    if len(argv) <= 3:
+        return 'auto', ''
+    raw_value = argv[3].strip()
+    lowered = raw_value.lower()
+    if lowered in ('fresh', 'scratch', 'from_scratch', 'restart', 'never', 'noresume'):
+        return 'never', ''
+    if lowered in ('resume', 'auto', 'latest'):
+        return 'auto', ''
+    if raw_value.startswith('resume='):
+        return 'path', raw_value[len('resume='):]
+    if raw_value.startswith('checkpoint='):
+        return 'path', raw_value[len('checkpoint='):]
+    return 'path', raw_value
+
+
+def resolve_resume_behavior(model_dir, model_name, argv, logger):
+    cli_mode, cli_path = parse_resume_request(argv)
+    env_mode = os.environ.get('RLREP_RESUME_MODE', '').strip().lower()
+    env_path = os.environ.get('RLREP_RESUME_PATH', '').strip()
+
+    resume_mode = cli_mode
+    resume_path = cli_path
+
+    if env_mode:
+        if env_mode in ('fresh', 'scratch', 'from_scratch', 'restart', 'never', 'noresume', 'false', '0'):
+            resume_mode = 'never'
+            resume_path = ''
+        elif env_mode in ('resume', 'auto', 'latest', 'true', '1'):
+            resume_mode = 'auto'
+            resume_path = ''
+        elif env_mode in ('path', 'explicit'):
+            resume_mode = 'path'
+        else:
+            logger.warning('Unknown RLREP_RESUME_MODE=%s, fallback to CLI/default mode=%s', env_mode, resume_mode)
+
+    if env_path:
+        resume_mode = 'path'
+        resume_path = env_path
+
+    if resume_mode == 'never':
+        logger.info('Resume mode: fresh start (ignore checkpoints)')
+        return None, -1
+
+    if resume_mode == 'path':
+        if not resume_path:
+            raise ValueError('Resume mode "path" requires a checkpoint path')
+        resume_path = os.path.abspath(resume_path)
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError('Resume checkpoint not found: {}'.format(resume_path))
+        matched = re.search(r'_train_epoch_(\d+)\.pt$', os.path.basename(resume_path))
+        resume_epoch = int(matched.group(1)) if matched else -1
+        logger.info('Resume mode: explicit checkpoint ({})'.format(resume_path))
+        return resume_path, resume_epoch
+
+    resume_path, resume_epoch = find_latest_train_checkpoint(model_dir, model_name)
+    if resume_path is not None:
+        logger.info('Resume mode: auto latest checkpoint ({})'.format(resume_path))
+    else:
+        logger.info('Resume mode: auto, but no checkpoint found; start from scratch')
+    return resume_path, resume_epoch
+
+
 if __name__ == "__main__":
     model_name = sys.argv[1]  # "multistep_RLRep" or "mutation"
     path = sys.argv[2]  # "dataset_vul/newALLBUGS"
@@ -192,7 +255,7 @@ if __name__ == "__main__":
         beam_search_use = 5
         model_dir = 'dataset_vul/newALLBUGS/model'
         os.makedirs(model_dir, exist_ok=True)
-        resume_path, resume_epoch = find_latest_train_checkpoint(model_dir, model_name)
+        resume_path, resume_epoch = resolve_resume_behavior(model_dir, model_name, sys.argv, logger)
         if resume_path is not None:
             checkpoint = model.load(resume_path)
             start = checkpoint.get('epoch', resume_epoch)

@@ -450,6 +450,12 @@ class Model(nn.Module):
             _, best_preds = self.actor.beam_search(inputs, size)
         return best_preds
 
+    def beam_search_all(self, inputs, size):
+        self.eval()
+        with INFERENCE_CONTEXT():
+            all_preds, best_preds = self.actor.beam_search(inputs, size)
+        return all_preds, best_preds
+
     def pretrain(self, inputs, targets, mode):
         self.optimizer_actor.zero_grad()
         device = self.device
