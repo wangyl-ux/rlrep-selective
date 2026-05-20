@@ -193,9 +193,6 @@ def classify_target_vulnerability(contract_path, original_counts, original_detec
     if 'tx.origin' in fault_lower:
         return 'TX', 'fault_line_tx_origin', positive, fault_line
 
-    if looks_like_arithmetic_issue(fault_line) and ('IO' in positive or not original_detect_ok):
-        return 'IO', 'fault_line_arithmetic', positive, fault_line
-
     if is_external_call_line(fault_line):
         guarded = any(marker in fault_lower for marker in CONTROL_MARKERS)
         if 'ED' in positive and 'RE' not in positive:
@@ -208,6 +205,9 @@ def classify_target_vulnerability(contract_path, original_counts, original_detec
             return 'ED', 'external_call_ambiguous_prefers_ed', positive, fault_line
         if not original_detect_ok:
             return 'ED', 'fault_line_external_call_only', positive, fault_line
+
+    if looks_like_arithmetic_issue(fault_line) and ('IO' in positive or not original_detect_ok):
+        return 'IO', 'fault_line_arithmetic', positive, fault_line
 
     if 'RE' in positive and looks_like_state_update(fault_line) and has_recent_external_call(prev_lines):
         return 'RE', 'state_update_after_external_call', positive, fault_line
@@ -342,7 +342,7 @@ def evaluate_candidate(
 
 def write_csv(path, rows, fieldnames):
     with open(path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
