@@ -12,6 +12,7 @@ from evaluate_rlrep import (
     evaluate_original,
     get_fault_context,
     get_split_paths,
+    looks_like_tod_line,
     write_csv,
 )
 
@@ -24,6 +25,8 @@ def parse_args():
     parser.add_argument('--split', default='validation')
     parser.add_argument('--detect-profile', default=os.environ.get('RLREP_DETECT_PROFILE', 'paper_default'))
     parser.add_argument('--detect-time-limit', type=int, default=60)
+    parser.add_argument('--tod-supplement-profile', default='sailfish_tod')
+    parser.add_argument('--disable-tod-supplement', action='store_true')
     parser.add_argument('--max-samples', type=int, default=0)
     parser.add_argument('--output-dir', default='')
     return parser.parse_args()
@@ -72,6 +75,7 @@ def infer_confidence(target_vuln, target_source, original_detect_ok, positive_ty
     high_sources = {
         'unique_detect',
         'fault_line_tx_origin',
+        'fault_context_tx_origin',
         'external_call_detect_ed',
         'external_call_detect_re',
         'state_update_after_external_call',
@@ -84,13 +88,19 @@ def infer_confidence(target_vuln, target_source, original_detect_ok, positive_ty
         'fault_line_arithmetic',
         'fault_line_tod_keyword',
         'detect_prefers_tod',
+        'tod_supplement_sailfish',
     }
     low_sources = {
-        'fault_line_external_call_only',
+        'partial_external_call_only',
+        'partial_state_update_after_external_call',
+        'partial_arithmetic_only',
+        'partial_tod_only',
         'fault_line_tod_only',
         'unresolved',
     }
 
+    if target_source.startswith('partial_'):
+        return 'low'
     if target_source in high_sources:
         return 'high'
     if target_source in low_sources:
@@ -118,7 +128,62 @@ def needs_manual_review(row):
     return 0
 
 
-def build_row(sample_name, contract_path, original_info):
+def evaluate_original_with_profile(contract_path, detect_time_limit, detect_profile):
+    previous_profile = os.environ.get('RLREP_DETECT_PROFILE')
+    os.environ['RLREP_DETECT_PROFILE'] = detect_profile
+    try:
+        return evaluate_original(contract_path, detect_time_limit)
+    finally:
+        if previous_profile is None:
+            os.environ.pop('RLREP_DETECT_PROFILE', None)
+        else:
+            os.environ['RLREP_DETECT_PROFILE'] = previous_profile
+
+
+def should_run_tod_supplement(row, positive_types, original_info, tod_supplement_profile):
+    if not tod_supplement_profile:
+        return False
+    if row['target_vuln'] == 'TOD' and row['confidence'] == 'high':
+        return False
+    if original_info['original_failed_tool'] == 'securify':
+        return True
+    if 'TOD' in positive_types:
+        return True
+    if looks_like_tod_line(row['fault_line']):
+        return True
+    if row['target_vuln'] == 'UNRESOLVED':
+        return True
+    return False
+
+
+def apply_tod_supplement(row, contract_path, positive_types, original_info, detect_time_limit, tod_supplement_profile):
+    row['tod_supplement_profile'] = tod_supplement_profile or ''
+    row['tod_supplement_requested'] = 0
+    row['tod_supplement_detect_ok'] = 0
+    row['tod_supplement_counts_json'] = ''
+    row['tod_supplement_failed_tool'] = ''
+    row['tod_supplement_failed_reason'] = ''
+    row['tod_supplement_applied'] = 0
+
+    if not should_run_tod_supplement(row, positive_types, original_info, tod_supplement_profile):
+        return row
+
+    row['tod_supplement_requested'] = 1
+    supplement_info = evaluate_original_with_profile(contract_path, detect_time_limit, tod_supplement_profile)
+    row['tod_supplement_detect_ok'] = int(supplement_info['original_detect_ok'])
+    row['tod_supplement_counts_json'] = counts_to_json(supplement_info['original_counts'])
+    row['tod_supplement_failed_tool'] = supplement_info['original_failed_tool']
+    row['tod_supplement_failed_reason'] = supplement_info['original_failed_reason']
+
+    if supplement_info['original_detect_ok'] and supplement_info['original_counts'].get('TOD', 0) > 0:
+        row['target_vuln'] = 'TOD'
+        row['target_source'] = 'tod_supplement_sailfish'
+        row['confidence'] = 'medium'
+        row['tod_supplement_applied'] = 1
+    return row
+
+
+def build_row(sample_name, contract_path, original_info, detect_time_limit, tod_supplement_profile):
     context = get_fault_context(contract_path)
     target_vuln, target_source, positive_types, fault_line = classify_target_vulnerability(
         contract_path,
@@ -153,6 +218,14 @@ def build_row(sample_name, contract_path, original_info):
         'original_total': original_info['original_total'],
         'original_counts_json': counts_to_json(original_info['original_counts']),
     }
+    row = apply_tod_supplement(
+        row,
+        contract_path,
+        positive_types,
+        original_info,
+        detect_time_limit,
+        tod_supplement_profile,
+    )
     row['manual_review'] = needs_manual_review(row)
     return row
 
@@ -191,6 +264,7 @@ def print_summary(rows, type_rows, confidence_rows):
 def main():
     args = parse_args()
     os.environ['RLREP_DETECT_PROFILE'] = args.detect_profile
+    tod_supplement_profile = '' if args.disable_tod_supplement else args.tod_supplement_profile
 
     dataset_path = os.path.abspath(args.dataset_path)
     contract_dir, _, _ = get_split_paths(dataset_path, args.split)
@@ -221,10 +295,16 @@ def main():
         sample_name = filename[:-4]
         contract_path = os.path.join(contract_dir, filename)
         original_info = evaluate_original(contract_path, args.detect_time_limit)
-        row = build_row(sample_name, contract_path, original_info)
+        row = build_row(
+            sample_name,
+            contract_path,
+            original_info,
+            args.detect_time_limit,
+            tod_supplement_profile,
+        )
         rows.append(row)
         print(
-            '[{}/{}] {} target={} source={} confidence={} review={}'.format(
+            '[{}/{}] {} target={} source={} confidence={} review={} tod_supplement={}'.format(
                 index,
                 len(sample_names),
                 sample_name,
@@ -232,6 +312,7 @@ def main():
                 row['target_source'],
                 row['confidence'],
                 row['manual_review'],
+                row['tod_supplement_applied'],
             )
         )
 
@@ -256,6 +337,13 @@ def main():
         'original_failed_reason',
         'original_total',
         'original_counts_json',
+        'tod_supplement_profile',
+        'tod_supplement_requested',
+        'tod_supplement_detect_ok',
+        'tod_supplement_counts_json',
+        'tod_supplement_failed_tool',
+        'tod_supplement_failed_reason',
+        'tod_supplement_applied',
     ]
 
     write_csv(os.path.join(output_dir, 'sample_type_labels.csv'), rows, label_fields)
@@ -271,9 +359,12 @@ def main():
                 'dataset_path': dataset_path,
                 'split': args.split,
                 'detect_profile': args.detect_profile,
+                'tod_supplement_profile': tod_supplement_profile,
                 'detect_time_limit': args.detect_time_limit,
                 'sample_count': len(rows),
                 'manual_review_count': len(manual_review_rows),
+                'tod_supplement_requested_count': sum(int(row['tod_supplement_requested']) for row in rows),
+                'tod_supplement_applied_count': sum(int(row['tod_supplement_applied']) for row in rows),
                 'type_breakdown': type_rows,
                 'source_breakdown': source_rows,
                 'confidence_breakdown': confidence_rows,

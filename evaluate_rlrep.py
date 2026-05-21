@@ -169,6 +169,11 @@ def has_recent_external_call(prev_lines):
     return any(marker in prev_text for marker in EXTERNAL_CALL_MARKERS)
 
 
+def has_tx_origin_context(fault_line, prev_lines, next_lines):
+    context_text = ' '.join(prev_lines + [fault_line] + next_lines).lower()
+    return 'tx.origin' in context_text
+
+
 def choose_by_max_count(counts, preferred_order):
     max_count = max(counts.values()) if counts else 0
     if max_count <= 0:
@@ -185,13 +190,14 @@ def classify_target_vulnerability(contract_path, original_counts, original_detec
     fault_line = strip_spaces(context['fault_line'])
     fault_lower = fault_line.lower()
     prev_lines = context['prev_lines']
+    next_lines = context['next_lines']
     positive = [name for name in VULN_KEYS if original_counts.get(name, 0) > 0]
-
-    if len(positive) == 1:
-        return positive[0], 'unique_detect', positive, fault_line
 
     if 'tx.origin' in fault_lower:
         return 'TX', 'fault_line_tx_origin', positive, fault_line
+
+    if has_tx_origin_context(fault_line, prev_lines, next_lines):
+        return 'TX', 'fault_context_tx_origin', positive, fault_line
 
     if is_external_call_line(fault_line):
         guarded = any(marker in fault_lower for marker in CONTROL_MARKERS)
@@ -204,13 +210,22 @@ def classify_target_vulnerability(contract_path, original_counts, original_detec
                 return 'RE', 'external_call_ambiguous_prefers_re', positive, fault_line
             return 'ED', 'external_call_ambiguous_prefers_ed', positive, fault_line
         if not original_detect_ok:
-            return 'ED', 'fault_line_external_call_only', positive, fault_line
-
-    if looks_like_arithmetic_issue(fault_line) and ('IO' in positive or not original_detect_ok):
-        return 'IO', 'fault_line_arithmetic', positive, fault_line
+            return 'ED', 'partial_external_call_only', positive, fault_line
 
     if 'RE' in positive and looks_like_state_update(fault_line) and has_recent_external_call(prev_lines):
         return 'RE', 'state_update_after_external_call', positive, fault_line
+
+    if not original_detect_ok and looks_like_state_update(fault_line) and has_recent_external_call(prev_lines):
+        return 'RE', 'partial_state_update_after_external_call', positive, fault_line
+
+    if original_detect_ok and len(positive) == 1:
+        return positive[0], 'unique_detect', positive, fault_line
+
+    if looks_like_arithmetic_issue(fault_line) and 'IO' in positive:
+        return 'IO', 'fault_line_arithmetic', positive, fault_line
+
+    if not original_detect_ok and looks_like_arithmetic_issue(fault_line):
+        return 'IO', 'partial_arithmetic_only', positive, fault_line
 
     if 'TOD' in positive and looks_like_tod_line(fault_line):
         return 'TOD', 'fault_line_tod_keyword', positive, fault_line
@@ -218,14 +233,17 @@ def classify_target_vulnerability(contract_path, original_counts, original_detec
     if 'TOD' in positive and 'TX' not in positive and 'IO' not in positive:
         return 'TOD', 'detect_prefers_tod', positive, fault_line
 
-    target, tie_types = choose_by_max_count(original_counts, preferred_order=('TOD', 'RE', 'ED', 'IO', 'TX'))
-    if target:
-        if len(tie_types) == 1:
-            return target, 'max_detect_count', positive, fault_line
-        return target, 'max_detect_count_tie={}'.format('|'.join(tie_types)), positive, fault_line
+    if original_detect_ok:
+        target, tie_types = choose_by_max_count(original_counts, preferred_order=('TOD', 'RE', 'ED', 'IO', 'TX'))
+        if target:
+            if len(tie_types) == 1:
+                return target, 'max_detect_count', positive, fault_line
+            return target, 'max_detect_count_tie={}'.format('|'.join(tie_types)), positive, fault_line
 
     if looks_like_tod_line(fault_line):
-        return 'TOD', 'fault_line_tod_only', positive, fault_line
+        if original_detect_ok:
+            return 'TOD', 'fault_line_tod_only', positive, fault_line
+        return 'TOD', 'partial_tod_only', positive, fault_line
 
     return 'UNRESOLVED', 'unresolved', positive, fault_line
 
