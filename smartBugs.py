@@ -187,11 +187,12 @@ def _parse_mythril(execution_result):
     failure_reason = _execution_failure_reason(execution_result)
     if failure_reason is not None:
         return False, counts, failure_reason
-    if 'analysis' not in execution_result.keys() or execution_result['analysis'] == {}:
+    analysis = execution_result.get('analysis')
+    if not isinstance(analysis, dict) or analysis == {}:
         return False, counts, 'no_analysis'
-    if execution_result['analysis'].get('success') is False:
+    if analysis.get('success') is False:
         return False, counts, 'analysis_failed'
-    for obj in execution_result['analysis'].get('issues', []):
+    for obj in analysis.get('issues', []):
         title = obj.get('title', '')
         if title in ('Message call to external contract', 'State access after external call', 'DAO'):
             counts['RE'] += 1
@@ -349,7 +350,12 @@ def smart(contract_path, ltime, use_cache=False):
         sys.argv[1:] = ['--tool', tool, '--file', contract_path]
         args = create_parser()
         execution_result = exec_cmd(args, ltime)
-        ok, parsed_counts, reason = TOOL_PARSERS[tool](execution_result)
+        try:
+            ok, parsed_counts, reason = TOOL_PARSERS[tool](execution_result)
+        except Exception as exc:
+            ok = False
+            parsed_counts = _new_counts()
+            reason = 'parser_exception:{}:{}'.format(type(exc).__name__, str(exc))
         _log_tool_result(
             profile_name,
             contract_path,
