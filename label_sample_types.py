@@ -125,6 +125,8 @@ def needs_manual_review(row):
         return 1
     if row['fault_line_count'] != 1:
         return 1
+    if row.get('tod_supplement_seen_tod') and not row.get('tod_supplement_applied'):
+        return 1
     return 0
 
 
@@ -156,14 +158,41 @@ def should_run_tod_supplement(row, positive_types, original_info, tod_supplement
     return False
 
 
+def should_override_with_tod(row):
+    source = row['target_source']
+    target = row['target_vuln']
+
+    if target == 'UNRESOLVED':
+        return True, 'main_unresolved'
+    if source.startswith('partial_'):
+        return True, 'main_partial'
+    if source in ('detect_prefers_tod', 'fault_line_tod_keyword', 'fault_line_tod_only'):
+        return True, 'main_tod_leaning'
+    if source.startswith('max_detect_count_tie=') and 'TOD' in source:
+        return True, 'main_tie_includes_tod'
+    if target == 'TOD':
+        return False, 'already_tod'
+    return False, 'strong_non_tod_main_label'
+
+
 def apply_tod_supplement(row, contract_path, positive_types, original_info, detect_time_limit, tod_supplement_profile):
+    row['main_target_vuln'] = row['target_vuln']
+    row['main_target_source'] = row['target_source']
+    row['main_confidence'] = row['confidence']
     row['tod_supplement_profile'] = tod_supplement_profile or ''
     row['tod_supplement_requested'] = 0
     row['tod_supplement_detect_ok'] = 0
+    row['tod_supplement_detect_status'] = ''
     row['tod_supplement_counts_json'] = ''
+    row['tod_supplement_positive_types'] = ''
     row['tod_supplement_failed_tool'] = ''
     row['tod_supplement_failed_reason'] = ''
+    row['tod_supplement_tod_count'] = 0
+    row['tod_supplement_seen_tod'] = 0
+    row['tod_supplement_override_allowed'] = 0
+    row['tod_supplement_override_reason'] = ''
     row['tod_supplement_applied'] = 0
+    row['tod_supplement_conflict'] = 0
 
     if not should_run_tod_supplement(row, positive_types, original_info, tod_supplement_profile):
         return row
@@ -171,15 +200,28 @@ def apply_tod_supplement(row, contract_path, positive_types, original_info, dete
     row['tod_supplement_requested'] = 1
     supplement_info = evaluate_original_with_profile(contract_path, detect_time_limit, tod_supplement_profile)
     row['tod_supplement_detect_ok'] = int(supplement_info['original_detect_ok'])
+    row['tod_supplement_detect_status'] = supplement_info['original_detect_status']
     row['tod_supplement_counts_json'] = counts_to_json(supplement_info['original_counts'])
+    row['tod_supplement_positive_types'] = '|'.join(
+        name for name in VULN_KEYS if supplement_info['original_counts'].get(name, 0) > 0
+    )
     row['tod_supplement_failed_tool'] = supplement_info['original_failed_tool']
     row['tod_supplement_failed_reason'] = supplement_info['original_failed_reason']
+    row['tod_supplement_tod_count'] = int(supplement_info['original_counts'].get('TOD', 0))
 
-    if supplement_info['original_detect_ok'] and supplement_info['original_counts'].get('TOD', 0) > 0:
-        row['target_vuln'] = 'TOD'
-        row['target_source'] = 'tod_supplement_sailfish'
-        row['confidence'] = 'medium'
-        row['tod_supplement_applied'] = 1
+    override_allowed, override_reason = should_override_with_tod(row)
+    row['tod_supplement_override_allowed'] = int(override_allowed)
+    row['tod_supplement_override_reason'] = override_reason
+
+    if supplement_info['original_detect_ok'] and row['tod_supplement_tod_count'] > 0:
+        row['tod_supplement_seen_tod'] = 1
+        if override_allowed:
+            row['target_vuln'] = 'TOD'
+            row['target_source'] = 'tod_supplement_sailfish'
+            row['confidence'] = 'medium'
+            row['tod_supplement_applied'] = 1
+        else:
+            row['tod_supplement_conflict'] = 1
     return row
 
 
@@ -304,14 +346,16 @@ def main():
         )
         rows.append(row)
         print(
-            '[{}/{}] {} target={} source={} confidence={} review={} tod_supplement={}'.format(
+            '[{}/{}] {} main={} final={} source={} confidence={} review={} tod_seen={} tod_override={}'.format(
                 index,
                 len(sample_names),
                 sample_name,
+                row['main_target_vuln'],
                 row['target_vuln'],
                 row['target_source'],
                 row['confidence'],
                 row['manual_review'],
+                row['tod_supplement_seen_tod'],
                 row['tod_supplement_applied'],
             )
         )
@@ -323,6 +367,9 @@ def main():
         'sample_name',
         'base_address',
         'target_function',
+        'main_target_vuln',
+        'main_target_source',
+        'main_confidence',
         'target_vuln',
         'target_source',
         'confidence',
@@ -340,10 +387,17 @@ def main():
         'tod_supplement_profile',
         'tod_supplement_requested',
         'tod_supplement_detect_ok',
+        'tod_supplement_detect_status',
         'tod_supplement_counts_json',
+        'tod_supplement_positive_types',
         'tod_supplement_failed_tool',
         'tod_supplement_failed_reason',
+        'tod_supplement_tod_count',
+        'tod_supplement_seen_tod',
+        'tod_supplement_override_allowed',
+        'tod_supplement_override_reason',
         'tod_supplement_applied',
+        'tod_supplement_conflict',
     ]
 
     write_csv(os.path.join(output_dir, 'sample_type_labels.csv'), rows, label_fields)
@@ -364,7 +418,9 @@ def main():
                 'sample_count': len(rows),
                 'manual_review_count': len(manual_review_rows),
                 'tod_supplement_requested_count': sum(int(row['tod_supplement_requested']) for row in rows),
+                'tod_supplement_seen_tod_count': sum(int(row['tod_supplement_seen_tod']) for row in rows),
                 'tod_supplement_applied_count': sum(int(row['tod_supplement_applied']) for row in rows),
+                'tod_supplement_conflict_count': sum(int(row['tod_supplement_conflict']) for row in rows),
                 'type_breakdown': type_rows,
                 'source_breakdown': source_rows,
                 'confidence_breakdown': confidence_rows,
