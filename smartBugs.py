@@ -61,6 +61,10 @@ def _progress_log_enabled():
     return os.environ.get('RLREP_SMARTBUGS_PROGRESS', '0') == '1'
 
 
+def _continue_on_tool_failure():
+    return os.environ.get('RLREP_DETECT_CONTINUE_ON_FAIL', '0').lower() in ('1', 'true', 'yes', 'continue')
+
+
 def _new_counts():
     return {key: 0 for key in VULN_KEYS}
 
@@ -337,6 +341,7 @@ def smart(contract_path, ltime, use_cache=False):
     profile_name = get_detect_profile_name()
     profile = DETECT_PROFILES[profile_name]
     cache_key = _make_cache_key(contract_path, ltime, profile_name)
+    continue_on_fail = _continue_on_tool_failure()
     if use_cache and cache_key in SMART_RESULT_CACHE:
         cached = SMART_RESULT_CACHE[cache_key]
         cache_detail = copy.deepcopy(cached['detail'])
@@ -346,6 +351,7 @@ def smart(contract_path, ltime, use_cache=False):
         return cached['error']
 
     total_counts = _new_counts()
+    failed_tools = []
     for tool in profile['tools']:
         sys.argv[1:] = ['--tool', tool, '--file', contract_path]
         args = create_parser()
@@ -366,6 +372,12 @@ def smart(contract_path, ltime, use_cache=False):
             reason,
         )
         if not ok:
+            failed_tools.append({
+                'tool': tool,
+                'reason': reason or 'unknown',
+            })
+            if continue_on_fail:
+                continue
             _set_last_smart_details({
                 'profile': profile_name,
                 'contract': _contract_label(contract_path),
@@ -378,6 +390,34 @@ def smart(contract_path, ltime, use_cache=False):
             return -1
         for vuln_name in profile['tool_vulns'][tool]:
             total_counts[vuln_name] += parsed_counts.get(vuln_name, 0)
+
+    if failed_tools:
+        failed_tool_names = '|'.join(item['tool'] for item in failed_tools)
+        failed_reason_text = '|'.join(
+            '{}:{}'.format(item['tool'], item['reason'])
+            for item in failed_tools
+        )
+        partial_detail = {
+            'profile': profile_name,
+            'contract': _contract_label(contract_path),
+            'status': 'partial',
+            'error': -1,
+            'counts': total_counts.copy(),
+            'failed_tool': failed_tool_names,
+            'failed_reason': failed_reason_text,
+        }
+        _set_last_smart_details(partial_detail)
+        print(
+            '[detect] profile={} contract={} status=partial failed_tools={} total={}'.format(
+                profile_name,
+                _contract_label(contract_path),
+                failed_tool_names,
+                _format_counts(total_counts, VULN_KEYS),
+            )
+        )
+        if use_cache:
+            SMART_RESULT_CACHE[cache_key] = {'error': -1, 'counts': total_counts.copy(), 'detail': copy.deepcopy(partial_detail)}
+        return -1
 
     total_error = sum(total_counts.values())
     success_detail = {
