@@ -8,10 +8,16 @@ from collections import Counter
 
 from evaluate_rlrep import (
     VULN_KEYS,
+    choose_by_max_count,
     classify_target_vulnerability,
     evaluate_original,
     get_fault_context,
     get_split_paths,
+    has_recent_external_call,
+    has_tx_origin_context,
+    is_external_call_line,
+    looks_like_arithmetic_issue,
+    looks_like_state_update,
     looks_like_tod_line,
     write_csv,
 )
@@ -118,16 +124,112 @@ def infer_confidence(target_vuln, target_source, original_detect_ok, positive_ty
     return 'medium'
 
 
-def needs_manual_review(row):
-    if row['confidence'] != 'high':
-        return 1
-    if not row['original_detect_ok']:
-        return 1
+def derive_benchmark_label(row, context, positive_types, original_counts, original_detect_ok):
+    strict_vuln = row['strict_target_vuln']
+    strict_source = row['strict_target_source']
+    strict_confidence = row['strict_confidence']
+    fault_line = row['fault_line']
+
+    if strict_vuln != 'UNRESOLVED':
+        if (
+            row.get('tod_supplement_seen_tod')
+            and strict_vuln in ('ED', 'RE', 'IO')
+            and (
+                row['main_target_source'].startswith('partial_')
+                or row['main_target_source'] in ('detect_prefers_tod', 'fault_line_tod_keyword', 'fault_line_tod_only')
+                or looks_like_tod_line(fault_line)
+            )
+        ):
+            return 'TOD', 'benchmark_tod_family_from_supplement', 'medium'
+        if strict_confidence == 'high':
+            return strict_vuln, 'strict_passthrough', 'high'
+        return strict_vuln, 'strict_passthrough', 'medium'
+
+    if has_tx_origin_context(fault_line, context['prev_lines'], context['next_lines']):
+        return 'TX', 'benchmark_tx_origin_context', 'high'
+
+    if row.get('tod_supplement_seen_tod'):
+        if looks_like_tod_line(fault_line) or 'TOD' in positive_types:
+            return 'TOD', 'benchmark_tod_supplement_supported', 'medium'
+        return 'TOD', 'benchmark_tod_supplement_only', 'low'
+
+    if 'TOD' in positive_types and looks_like_tod_line(fault_line):
+        return 'TOD', 'benchmark_tod_detect_supported', 'medium'
+
+    if 'TOD' in positive_types:
+        return 'TOD', 'benchmark_tod_detect_only', 'low'
+
+    if is_external_call_line(fault_line):
+        if 'RE' in positive_types or has_recent_external_call(context['prev_lines']):
+            return 'RE', 'benchmark_external_call_re_guess', 'low'
+        return 'ED', 'benchmark_external_call_ed_guess', 'low'
+
+    if looks_like_state_update(fault_line) and has_recent_external_call(context['prev_lines']):
+        return 'RE', 'benchmark_state_update_after_external_call', 'low'
+
+    if looks_like_arithmetic_issue(fault_line):
+        return 'IO', 'benchmark_arithmetic_guess', 'low'
+
+    if looks_like_tod_line(fault_line):
+        return 'TOD', 'benchmark_tod_syntax_guess', 'low'
+
+    if original_detect_ok:
+        target, tie_types = choose_by_max_count(original_counts, preferred_order=('TOD', 'RE', 'ED', 'IO', 'TX'))
+        if target:
+            if len(tie_types) == 1:
+                return target, 'benchmark_max_detect_count', 'low'
+            return target, 'benchmark_max_detect_count_tie={}'.format('|'.join(tie_types)), 'low'
+
+    return 'UNRESOLVED', 'benchmark_unresolved', 'low'
+
+
+def derive_manual_review(row):
+    reasons = []
+
     if row['fault_line_count'] != 1:
-        return 1
+        reasons.append('multiple_fault_lines')
+    if not row['original_detect_ok']:
+        reasons.append('detector_incomplete')
+    if row['strict_confidence'] != 'high':
+        reasons.append('strict_confidence_{}'.format(row['strict_confidence']))
+    if row['strict_target_vuln'] == 'UNRESOLVED':
+        reasons.append('strict_unresolved')
+    if row['benchmark_confidence'] != 'high':
+        reasons.append('benchmark_confidence_{}'.format(row['benchmark_confidence']))
+    if row['benchmark_target_vuln'] == 'UNRESOLVED':
+        reasons.append('benchmark_unresolved')
+    if row['benchmark_target_vuln'] != row['strict_target_vuln']:
+        reasons.append('benchmark_changed_family')
     if row.get('tod_supplement_seen_tod') and not row.get('tod_supplement_applied'):
-        return 1
-    return 0
+        reasons.append('tod_signal_conflict')
+
+    high_priority = {
+        'multiple_fault_lines',
+        'strict_unresolved',
+        'benchmark_unresolved',
+        'tod_signal_conflict',
+    }
+    medium_priority = {
+        'detector_incomplete',
+        'benchmark_changed_family',
+        'strict_confidence_medium',
+        'strict_confidence_low',
+        'benchmark_confidence_medium',
+        'benchmark_confidence_low',
+    }
+
+    if any(reason in high_priority for reason in reasons):
+        priority = 'high'
+    elif any(reason in medium_priority for reason in reasons):
+        priority = 'medium'
+    else:
+        priority = 'low'
+
+    return {
+        'manual_review': int(bool(reasons)),
+        'manual_reason_codes': '|'.join(reasons),
+        'review_priority': priority,
+    }
 
 
 def evaluate_original_with_profile(contract_path, detect_time_limit, detect_profile):
@@ -248,7 +350,6 @@ def build_row(sample_name, contract_path, original_info, detect_time_limit, tod_
         'target_vuln': target_vuln,
         'target_source': target_source,
         'confidence': confidence,
-        'manual_review': 0,
         'fault_line_count': fault_line_count,
         'bugline': context['bugline'] + 1 if context['bugline'] >= 0 else 0,
         'fault_line': fault_line,
@@ -268,19 +369,47 @@ def build_row(sample_name, contract_path, original_info, detect_time_limit, tod_
         detect_time_limit,
         tod_supplement_profile,
     )
-    row['manual_review'] = needs_manual_review(row)
+    row['strict_target_vuln'] = row['target_vuln']
+    row['strict_target_source'] = row['target_source']
+    row['strict_confidence'] = row['confidence']
+
+    benchmark_target_vuln, benchmark_target_source, benchmark_confidence = derive_benchmark_label(
+        row,
+        context,
+        positive_types,
+        original_info['original_counts'],
+        original_info['original_detect_ok'],
+    )
+    row['benchmark_target_vuln'] = benchmark_target_vuln
+    row['benchmark_target_source'] = benchmark_target_source
+    row['benchmark_confidence'] = benchmark_confidence
+    row['benchmark_target_changed'] = int(benchmark_target_vuln != row['strict_target_vuln'])
+
+    review = derive_manual_review(row)
+    row['manual_review'] = review['manual_review']
+    row['manual_reason_codes'] = review['manual_reason_codes']
+    row['review_priority'] = review['review_priority']
     return row
 
 
 def summarize(rows):
-    type_counter = Counter(row['target_vuln'] for row in rows)
-    source_counter = Counter(row['target_source'] for row in rows)
-    confidence_counter = Counter(row['confidence'] for row in rows)
+    strict_type_counter = Counter(row['strict_target_vuln'] for row in rows)
+    strict_source_counter = Counter(row['strict_target_source'] for row in rows)
+    strict_confidence_counter = Counter(row['strict_confidence'] for row in rows)
+    benchmark_type_counter = Counter(row['benchmark_target_vuln'] for row in rows)
+    benchmark_source_counter = Counter(row['benchmark_target_source'] for row in rows)
+    benchmark_confidence_counter = Counter(row['benchmark_confidence'] for row in rows)
     manual_counter = Counter(row['manual_review'] for row in rows)
+    priority_counter = Counter(row['review_priority'] for row in rows)
 
-    type_rows = [{'target_vuln': key, 'count': value} for key, value in sorted(type_counter.items())]
-    source_rows = [{'target_source': key, 'count': value} for key, value in sorted(source_counter.items())]
-    confidence_rows = [{'confidence': key, 'count': value} for key, value in sorted(confidence_counter.items())]
+    strict_type_rows = [{'target_vuln': key, 'count': value} for key, value in sorted(strict_type_counter.items())]
+    strict_source_rows = [{'target_source': key, 'count': value} for key, value in sorted(strict_source_counter.items())]
+    strict_confidence_rows = [{'confidence': key, 'count': value} for key, value in sorted(strict_confidence_counter.items())]
+    benchmark_type_rows = [{'target_vuln': key, 'count': value} for key, value in sorted(benchmark_type_counter.items())]
+    benchmark_source_rows = [{'target_source': key, 'count': value} for key, value in sorted(benchmark_source_counter.items())]
+    benchmark_confidence_rows = [
+        {'confidence': key, 'count': value} for key, value in sorted(benchmark_confidence_counter.items())
+    ]
     manual_rows = [
         {
             'manual_review': 'yes' if key else 'no',
@@ -288,17 +417,30 @@ def summarize(rows):
         }
         for key, value in sorted(manual_counter.items(), reverse=True)
     ]
-    return type_rows, source_rows, confidence_rows, manual_rows
+    priority_rows = [{'review_priority': key, 'count': value} for key, value in sorted(priority_counter.items())]
+    return {
+        'strict_type_rows': strict_type_rows,
+        'strict_source_rows': strict_source_rows,
+        'strict_confidence_rows': strict_confidence_rows,
+        'benchmark_type_rows': benchmark_type_rows,
+        'benchmark_source_rows': benchmark_source_rows,
+        'benchmark_confidence_rows': benchmark_confidence_rows,
+        'manual_rows': manual_rows,
+        'priority_rows': priority_rows,
+    }
 
 
-def print_summary(rows, type_rows, confidence_rows):
+def print_summary(rows, strict_type_rows, benchmark_type_rows, priority_rows):
     print('sample_count={}'.format(len(rows)))
-    print('target_vuln,count')
-    for row in type_rows:
+    print('strict_target_vuln,count')
+    for row in strict_type_rows:
         print('{},{}'.format(row['target_vuln'], row['count']))
-    print('confidence,count')
-    for row in confidence_rows:
-        print('{},{}'.format(row['confidence'], row['count']))
+    print('benchmark_target_vuln,count')
+    for row in benchmark_type_rows:
+        print('{},{}'.format(row['target_vuln'], row['count']))
+    print('review_priority,count')
+    for row in priority_rows:
+        print('{},{}'.format(row['review_priority'], row['count']))
     review_count = sum(1 for row in rows if row['manual_review'])
     print('manual_review_count={}'.format(review_count))
 
@@ -346,34 +488,43 @@ def main():
         )
         rows.append(row)
         print(
-            '[{}/{}] {} main={} final={} source={} confidence={} review={} tod_seen={} tod_override={}'.format(
+            '[{}/{}] {} main={} strict={} benchmark={} review={} priority={} tod_seen={} tod_override={}'.format(
                 index,
                 len(sample_names),
                 sample_name,
                 row['main_target_vuln'],
-                row['target_vuln'],
-                row['target_source'],
-                row['confidence'],
+                row['strict_target_vuln'],
+                row['benchmark_target_vuln'],
                 row['manual_review'],
+                row['review_priority'],
                 row['tod_supplement_seen_tod'],
                 row['tod_supplement_applied'],
             )
         )
 
     manual_review_rows = [row for row in rows if row['manual_review']]
-    type_rows, source_rows, confidence_rows, manual_rows = summarize(rows)
+    summaries = summarize(rows)
 
     label_fields = [
         'sample_name',
         'base_address',
         'target_function',
-        'main_target_vuln',
-        'main_target_source',
-        'main_confidence',
         'target_vuln',
         'target_source',
         'confidence',
+        'main_target_vuln',
+        'main_target_source',
+        'main_confidence',
+        'strict_target_vuln',
+        'strict_target_source',
+        'strict_confidence',
+        'benchmark_target_vuln',
+        'benchmark_target_source',
+        'benchmark_confidence',
+        'benchmark_target_changed',
         'manual_review',
+        'manual_reason_codes',
+        'review_priority',
         'fault_line_count',
         'bugline',
         'fault_line',
@@ -401,11 +552,49 @@ def main():
     ]
 
     write_csv(os.path.join(output_dir, 'sample_type_labels.csv'), rows, label_fields)
+    write_csv(os.path.join(output_dir, 'sample_type_labels_strict.csv'), rows, label_fields)
+    write_csv(os.path.join(output_dir, 'sample_type_labels_benchmark.csv'), rows, label_fields)
     write_csv(os.path.join(output_dir, 'manual_review.csv'), manual_review_rows, label_fields)
-    write_csv(os.path.join(output_dir, 'type_breakdown.csv'), type_rows, ['target_vuln', 'count'])
-    write_csv(os.path.join(output_dir, 'source_breakdown.csv'), source_rows, ['target_source', 'count'])
-    write_csv(os.path.join(output_dir, 'confidence_breakdown.csv'), confidence_rows, ['confidence', 'count'])
-    write_csv(os.path.join(output_dir, 'manual_review_breakdown.csv'), manual_rows, ['manual_review', 'count'])
+    write_csv(os.path.join(output_dir, 'manual_review_queue.csv'), manual_review_rows, label_fields)
+    write_csv(os.path.join(output_dir, 'type_breakdown.csv'), summaries['strict_type_rows'], ['target_vuln', 'count'])
+    write_csv(os.path.join(output_dir, 'source_breakdown.csv'), summaries['strict_source_rows'], ['target_source', 'count'])
+    write_csv(
+        os.path.join(output_dir, 'confidence_breakdown.csv'),
+        summaries['strict_confidence_rows'],
+        ['confidence', 'count'],
+    )
+    write_csv(os.path.join(output_dir, 'manual_review_breakdown.csv'), summaries['manual_rows'], ['manual_review', 'count'])
+    write_csv(os.path.join(output_dir, 'strict_type_breakdown.csv'), summaries['strict_type_rows'], ['target_vuln', 'count'])
+    write_csv(
+        os.path.join(output_dir, 'strict_source_breakdown.csv'),
+        summaries['strict_source_rows'],
+        ['target_source', 'count'],
+    )
+    write_csv(
+        os.path.join(output_dir, 'strict_confidence_breakdown.csv'),
+        summaries['strict_confidence_rows'],
+        ['confidence', 'count'],
+    )
+    write_csv(
+        os.path.join(output_dir, 'benchmark_type_breakdown.csv'),
+        summaries['benchmark_type_rows'],
+        ['target_vuln', 'count'],
+    )
+    write_csv(
+        os.path.join(output_dir, 'benchmark_source_breakdown.csv'),
+        summaries['benchmark_source_rows'],
+        ['target_source', 'count'],
+    )
+    write_csv(
+        os.path.join(output_dir, 'benchmark_confidence_breakdown.csv'),
+        summaries['benchmark_confidence_rows'],
+        ['confidence', 'count'],
+    )
+    write_csv(
+        os.path.join(output_dir, 'review_priority_breakdown.csv'),
+        summaries['priority_rows'],
+        ['review_priority', 'count'],
+    )
 
     with open(os.path.join(output_dir, 'summary.json'), 'w', encoding='utf-8') as f:
         json.dump(
@@ -421,16 +610,26 @@ def main():
                 'tod_supplement_seen_tod_count': sum(int(row['tod_supplement_seen_tod']) for row in rows),
                 'tod_supplement_applied_count': sum(int(row['tod_supplement_applied']) for row in rows),
                 'tod_supplement_conflict_count': sum(int(row['tod_supplement_conflict']) for row in rows),
-                'type_breakdown': type_rows,
-                'source_breakdown': source_rows,
-                'confidence_breakdown': confidence_rows,
+                'strict_type_breakdown': summaries['strict_type_rows'],
+                'strict_source_breakdown': summaries['strict_source_rows'],
+                'strict_confidence_breakdown': summaries['strict_confidence_rows'],
+                'benchmark_type_breakdown': summaries['benchmark_type_rows'],
+                'benchmark_source_breakdown': summaries['benchmark_source_rows'],
+                'benchmark_confidence_breakdown': summaries['benchmark_confidence_rows'],
+                'manual_review_breakdown': summaries['manual_rows'],
+                'review_priority_breakdown': summaries['priority_rows'],
             },
             f,
             indent=2,
             ensure_ascii=False,
         )
 
-    print_summary(rows, type_rows, confidence_rows)
+    print_summary(
+        rows,
+        summaries['strict_type_rows'],
+        summaries['benchmark_type_rows'],
+        summaries['priority_rows'],
+    )
     print('output_dir={}'.format(output_dir))
 
 
