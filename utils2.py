@@ -4,6 +4,7 @@ import solidityparser_compat
 from smartBugs import *
 from similarity_compute import *
 from entropy_compute import get_entropy
+from solc_compile import compile_contract_file
 
 LAST_FITNESS_DETAILS = None
 LAST_DETECT_DETAILS = None
@@ -128,15 +129,8 @@ def fitness_function2(original_contract, repair_contract) -> float:
         repair_contract_code = f.read()
     with open(original_contract) as f:
         original_contract_code = f.read()
-    repair_contract_list = repair_contract_code.split('\n')
     try:
-        for line in repair_contract_list:
-            if 'pragma solidity' in line:
-                num = re.compile(r'(\d+)\s*\.\s*(\d+)\s*\.\s*(\d+)')
-                v1, v2, v3 = re.search(num, line).group(1), re.search(num, line).group(2), re.search(num, line).group(3)
-                version = v1 + '.' + v2 + '.' + v3
-                break
-        solcx.compile_files(repair_contract, solc_version=version)
+        compile_contract_file(repair_contract)
     except:
         reward -= 0.02
         detail['compile_reward'] = -0.02

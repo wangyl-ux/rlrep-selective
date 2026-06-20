@@ -1,4 +1,5 @@
 from utils2 import *
+from solc_compile import compile_contract_file
 import solidityparser_compat
 import random
 
@@ -23,16 +24,8 @@ def finds(contract_path):
     return preceding, following, bugline
 
 def compile_ok(repair_path):
-    with open(repair_path) as f:
-        lines = f.readlines()
     try:
-        for line in lines:
-            if 'pragma solidity' in line:
-                num = re.compile(r'(\d+)\s*\.\s*(\d+)\s*\.\s*(\d+)')
-                v1, v2, v3 = re.search(num, line).group(1), re.search(num, line).group(2), re.search(num, line).group(3)
-                version = v1 + '.' + v2 + '.' + v3
-                break
-        solcx.compile_files(repair_path, solc_version=version)
+        compile_contract_file(repair_path)
         return True
     except:
         return False
