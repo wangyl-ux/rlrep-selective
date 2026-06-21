@@ -1,3 +1,4 @@
+import argparse
 from utils2 import *
 from genetic import *
 from collections import Counter
@@ -5,6 +6,8 @@ import os
 import pickle
 import re
 import sys
+
+from preprocessing.selective_context import prepare_context_directory
 
 class Config_RL_multistep:
     def __init__(self):
@@ -231,11 +234,39 @@ def resolve_resume_behavior(model_dir, model_name, argv, logger):
     return resume_path, resume_epoch
 
 
+def parse_main_args():
+    parser = argparse.ArgumentParser(description='Train RLRep or run the mutation baseline.')
+    parser.add_argument('model_name', help='multistep_RLRep or mutation')
+    parser.add_argument('dataset_path', help='dataset path, usually dataset_vul/newALLBUGS')
+    parser.add_argument('resume', nargs='?', default='', help='optional legacy resume argument')
+    parser.add_argument(
+        '--context-mode',
+        '--context_mode',
+        dest='context_mode',
+        choices=('original', 'selective'),
+        default='original',
+        help='original keeps RLRep 3-line context; selective builds metadata-driven compact context',
+    )
+    parser.add_argument(
+        '--metadata-csv',
+        '--metadata_csv',
+        dest='metadata_csv',
+        default='',
+        help='optional metadata csv override for selective context',
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    model_name = sys.argv[1]  # "multistep_RLRep" or "mutation"
-    path = sys.argv[2]  # "dataset_vul/newALLBUGS"
+    args = parse_main_args()
+    model_name = args.model_name  # "multistep_RLRep" or "mutation"
+    path = args.dataset_path  # "dataset_vul/newALLBUGS"
+    resume_argv = ['main.py', model_name, path]
+    if args.resume:
+        resume_argv.append(args.resume)
     
     logger = get_logger('dataset_vul/newALLBUGS/log/{}_logging.txt'.format(model_name))
+    logger.info('context mode: %s. metadata csv override: %s', args.context_mode, args.metadata_csv or '<default>')
     with open('{}/code_w2i.pkl'.format(path), 'rb') as f, open('{}/ast_w2i.pkl'.format(path), 'rb') as f2:
         code_w2i = pickle.load(f)
         ast_w2i = pickle.load(f2)
@@ -255,7 +286,7 @@ if __name__ == "__main__":
         beam_search_use = 5
         model_dir = 'dataset_vul/newALLBUGS/model'
         os.makedirs(model_dir, exist_ok=True)
-        resume_path, resume_epoch = resolve_resume_behavior(model_dir, model_name, sys.argv, logger)
+        resume_path, resume_epoch = resolve_resume_behavior(model_dir, model_name, resume_argv, logger)
         if resume_path is not None:
             checkpoint = model.load(resume_path)
             start = checkpoint.get('epoch', resume_epoch)
@@ -265,9 +296,40 @@ if __name__ == "__main__":
             model.load('dataset_vul/newALLBUGS/model/multistep_RLRep_33')
             model.set_trainer()
 
+        pretrain_contract_dir = os.path.join(path, 'contract')
+        train_contract_dir = os.path.join(path, 'contract')
+        validation_contract_dir = os.path.join(path, 'validation', 'contract')
+        pretrain_code_dir = prepare_context_directory(
+            path,
+            os.path.join(path, 'pretrain', 'threelines-tokenseq'),
+            pretrain_contract_dir,
+            'pretrain',
+            context_mode=args.context_mode,
+            metadata_csv=args.metadata_csv,
+            logger=logger,
+        )
+        train_code_dir = prepare_context_directory(
+            path,
+            os.path.join(path, 'threelines-tokenseq'),
+            train_contract_dir,
+            'train',
+            context_mode=args.context_mode,
+            metadata_csv=args.metadata_csv,
+            logger=logger,
+        )
+        validation_code_dir = prepare_context_directory(
+            path,
+            os.path.join(path, 'validation', 'threelines-tokenseq'),
+            validation_contract_dir,
+            'validation',
+            context_mode=args.context_mode,
+            metadata_csv=args.metadata_csv,
+            logger=logger,
+        )
+
         for epoch in range(start+1, config.PRE_EPOCH):
             loss = 0
-            code_dir = 'dataset_vul/newALLBUGS/pretrain/threelines-tokenseq'
+            code_dir = pretrain_code_dir
             ast_dir = 'dataset_vul/newALLBUGS/pretrain/ast'
             for step, batch in enumerate(get_batch(code_dir, ast_dir, config, in_w2i, pretrain=True)):
                 batch_in1, batch_in2, batch_in3, batch_out = batch
@@ -282,7 +344,7 @@ if __name__ == "__main__":
         for epoch in range(train_start_epoch, config.EPOCH):
             loss_actor = 0
             loss_critic = 0.
-            code_dir = 'dataset_vul/newALLBUGS/threelines-tokenseq'
+            code_dir = train_code_dir
             ast_dir = 'dataset_vul/newALLBUGS/ast'
             for step, batch in enumerate(get_batch(code_dir, ast_dir, config, in_w2i, pretrain=False)):
                 batch_in1, batch_in2, batch_in3 = batch
@@ -291,7 +353,7 @@ if __name__ == "__main__":
                 logger.info('Epoch: {}, Batch: {}, Loss: actor:{}'.format(epoch, step, loss_actor / (step + 1),))
 
             preds, ats, names, rewards, reward_details = [], [], [], [], []
-            valid_code_dir = "dataset_vul/newALLBUGS/validation/threelines-tokenseq"
+            valid_code_dir = validation_code_dir
             valid_ast_dir = "dataset_vul/newALLBUGS/validation/ast"
             for step, batch in enumerate(get_batch(valid_code_dir, valid_ast_dir, config, in_w2i, pretrain=False)):
                 batch_in1, batch_in2, batch_in3 = batch
@@ -383,6 +445,8 @@ if __name__ == "__main__":
 
                 
     if model_name == 'mutation':
+        if args.context_mode != 'original':
+            logger.warning('context mode %s is ignored by the mutation baseline', args.context_mode)
         with open("dataset_vul/newALLBUGS/dicts/v_code_w2i.pkl", 'rb') as tf, open("dataset_vul/newALLBUGS/dicts/v_code_i2w.pkl", 'rb') as tf2:
             val_code_w2i, val_code_i2w = pickle.load(tf), pickle.load(tf2)
         valid_code_dir = "dataset_vul/newALLBUGS/validation/contract/"

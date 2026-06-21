@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 from genetic import compile_ok
 from main import Config_RL_multistep
 from multistep_RLRep import Model
+from preprocessing.selective_context import prepare_context_directory
 from smartBugs import VULN_KEYS, get_last_smart_details, smart
 from utils2 import choose_action, get_action
 
@@ -36,6 +37,19 @@ def parse_args():
     parser.add_argument('--detect-profile', default=os.environ.get('RLREP_DETECT_PROFILE', 'paper_default'))
     parser.add_argument('--max-samples', type=int, default=0)
     parser.add_argument('--output-dir', default='')
+    parser.add_argument(
+        '--context-mode',
+        '--context_mode',
+        dest='context_mode',
+        choices=('original', 'selective'),
+        default='original',
+    )
+    parser.add_argument(
+        '--metadata-csv',
+        '--metadata_csv',
+        dest='metadata_csv',
+        default='',
+    )
     return parser.parse_args()
 
 
@@ -490,6 +504,18 @@ def main():
 
     code_w2i, ast_w2i = load_vocab(dataset_path)
     contract_dir, code_dir, ast_dir = get_split_paths(dataset_path, args.split)
+    selective_split = args.split
+    if args.split in ('train', 'root', 'full'):
+        selective_split = 'train'
+    code_dir = prepare_context_directory(
+        dataset_path,
+        code_dir,
+        contract_dir,
+        selective_split,
+        context_mode=args.context_mode,
+        metadata_csv=args.metadata_csv,
+        logger=None,
+    )
     for required_path in (contract_dir, code_dir, ast_dir):
         if not os.path.isdir(required_path):
             raise FileNotFoundError('Required split path not found: {}'.format(required_path))
@@ -506,12 +532,13 @@ def main():
     candidate_rows = []
     target_source_counter = Counter()
 
-    print('evaluate model={} split={} samples={} beam={} detect_profile={}'.format(
+    print('evaluate model={} split={} samples={} beam={} detect_profile={} context_mode={}'.format(
         model_path,
         args.split,
         len(sample_names),
         args.beam_size,
         args.detect_profile,
+        args.context_mode,
     ))
 
     for index, filename in enumerate(sample_names, 1):
@@ -697,6 +724,8 @@ def main():
                 'beam_size': args.beam_size,
                 'detect_profile': args.detect_profile,
                 'detect_time_limit': args.detect_time_limit,
+                'context_mode': args.context_mode,
+                'metadata_csv': args.metadata_csv,
                 'sample_count': len(sample_rows),
                 'summary': summary_rows,
                 'target_source_breakdown': target_source_rows,
