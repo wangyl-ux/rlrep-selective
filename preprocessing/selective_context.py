@@ -776,9 +776,22 @@ def write_csv(path, rows):
             writer.writerow({key: safe_csv_text(row.get(key, "")) for key in fieldnames})
 
 
-def prepare_context_directory(dataset_path, original_code_dir, contract_dir, split_name, context_mode="original", metadata_csv="", logger=None):
+def prepare_context_directory(dataset_path, original_code_dir, contract_dir, split_name,
+                              context_mode="original", metadata_csv="", logger=None,
+                              context_config=None):
     if context_mode == "original":
         return original_code_dir
+    if context_mode == "evidence_graph":
+        # Training/evaluation only consume offline output. Starting Docker after
+        # a GPU allocation would make missing preprocessing both slow and hidden.
+        from preprocessing.evidence_graph_context import require_prepared_evidence_directory
+        if context_config is None:
+            raise ValueError("evidence_graph requires an explicit context_config")
+        return require_prepared_evidence_directory(
+            dataset_path, original_code_dir, contract_dir, split_name,
+            context_config, metadata_csv=metadata_csv, logger=logger)
+    if context_mode not in ("selective", "selective_v1"):
+        raise ValueError("unsupported context mode: {}".format(context_mode))
 
     dataset_path = os.path.abspath(dataset_path)
     original_code_dir = os.path.abspath(original_code_dir)

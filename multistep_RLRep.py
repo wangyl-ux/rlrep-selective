@@ -476,7 +476,7 @@ class Model(nn.Module):
             self.optimizer_actor.step()
             return float(loss_actor)
 
-    def save(self, path, epoch=None, best_positive_repair=None):
+    def save(self, path, epoch=None, best_positive_repair=None, context_config=None):
         checkpoint = {
             'config': self.config,
             # Old behavior stored full modules and optimizer objects.
@@ -486,6 +486,7 @@ class Model(nn.Module):
             'optimizer_actor_state_dict': self.optimizer_actor.state_dict(),
             'epoch': epoch,
             'best_positive_repair': best_positive_repair,
+            'context_config': context_config,
         }
         torch.save(checkpoint, path)
 

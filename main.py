@@ -6,8 +6,14 @@ import os
 import pickle
 import re
 import sys
+import json
 
 from preprocessing.selective_context import prepare_context_directory
+from preprocessing.context_config import (
+    DEFAULT_SLITHER_IMAGE,
+    build_context_config,
+    validate_checkpoint_context,
+)
 
 class Config_RL_multistep:
     def __init__(self):
@@ -243,18 +249,29 @@ def parse_main_args():
         '--context-mode',
         '--context_mode',
         dest='context_mode',
-        choices=('original', 'selective'),
+        choices=('original', 'selective', 'selective_v1', 'evidence_graph'),
         default='original',
-        help='original keeps RLRep 3-line context; selective builds metadata-driven compact context',
+        help='original keeps RLRep 3-line context; selective/selective_v1 retain the old selector; evidence_graph reads offline Slither contexts',
     )
     parser.add_argument(
         '--metadata-csv',
         '--metadata_csv',
         dest='metadata_csv',
         default='',
-        help='optional metadata csv override for selective context',
+        help='optional metadata csv override for selective/evidence_graph context',
     )
-    return parser.parse_args()
+    parser.add_argument('--context-token-budget', type=int, default=64)
+    parser.add_argument('--context-max-nodes', type=int, default=8)
+    parser.add_argument('--context-max-hops', type=int, default=2)
+    parser.add_argument('--context-fallback', choices=('selective_v1', 'original'), default='selective_v1')
+    parser.add_argument('--slither-image', default=DEFAULT_SLITHER_IMAGE)
+    parser.add_argument(
+        '--allow-legacy-context-checkpoint', action='store_true',
+        help='explicitly allow an unverifiable legacy checkpoint with evidence_graph')
+    args = parser.parse_args()
+    if args.context_token_budget < 1 or args.context_max_nodes < 1 or args.context_max_hops < 0:
+        parser.error('context token/node budgets must be positive and max hops cannot be negative')
+    return args
 
 
 if __name__ == "__main__":
@@ -267,6 +284,15 @@ if __name__ == "__main__":
     
     logger = get_logger('dataset_vul/newALLBUGS/log/{}_logging.txt'.format(model_name))
     logger.info('context mode: %s. metadata csv override: %s', args.context_mode, args.metadata_csv or '<default>')
+    context_config = build_context_config(
+        args.context_mode,
+        args.context_token_budget,
+        args.context_max_nodes,
+        args.context_max_hops,
+        args.context_fallback,
+        args.slither_image,
+    )
+    logger.info('context_config=%s', json.dumps(context_config, sort_keys=True))
     with open('{}/code_w2i.pkl'.format(path), 'rb') as f, open('{}/ast_w2i.pkl'.format(path), 'rb') as f2:
         code_w2i = pickle.load(f)
         ast_w2i = pickle.load(f2)
@@ -289,6 +315,9 @@ if __name__ == "__main__":
         resume_path, resume_epoch = resolve_resume_behavior(model_dir, model_name, resume_argv, logger)
         if resume_path is not None:
             checkpoint = model.load(resume_path)
+            validate_checkpoint_context(
+                checkpoint, context_config, logger=logger, purpose='training resume',
+                allow_legacy_evidence=args.allow_legacy_context_checkpoint)
             start = checkpoint.get('epoch', resume_epoch)
             best_positive_repair = checkpoint.get('best_positive_repair', best_positive_repair)
             logger.info('Resume checkpoint: {} (epoch={})'.format(resume_path, start))
@@ -307,6 +336,7 @@ if __name__ == "__main__":
             context_mode=args.context_mode,
             metadata_csv=args.metadata_csv,
             logger=logger,
+            context_config=context_config,
         )
         train_code_dir = prepare_context_directory(
             path,
@@ -316,6 +346,7 @@ if __name__ == "__main__":
             context_mode=args.context_mode,
             metadata_csv=args.metadata_csv,
             logger=logger,
+            context_config=context_config,
         )
         validation_code_dir = prepare_context_directory(
             path,
@@ -325,6 +356,7 @@ if __name__ == "__main__":
             context_mode=args.context_mode,
             metadata_csv=args.metadata_csv,
             logger=logger,
+            context_config=context_config,
         )
 
         for epoch in range(start+1, config.PRE_EPOCH):
@@ -338,7 +370,7 @@ if __name__ == "__main__":
             # Old behavior saved a full checkpoint every pretrain epoch.
             # model.save('dataset_vul/newALLBUGS/model/{}_{}'.format(model_name, epoch))
             if (epoch + 1) % checkpoint_every == 0:
-                model.save(get_periodic_checkpoint_path(model_dir, model_name, epoch), epoch=epoch, best_positive_repair=best_positive_repair)
+                model.save(get_periodic_checkpoint_path(model_dir, model_name, epoch), epoch=epoch, best_positive_repair=best_positive_repair, context_config=context_config)
 
         train_start_epoch = max(config.PRE_EPOCH, start + 1)
         for epoch in range(train_start_epoch, config.EPOCH):
@@ -437,11 +469,11 @@ if __name__ == "__main__":
             if positive_repair > best_positive_repair:
                 best_positive_repair = positive_repair
                 print('model update. the {0}-th epoch. positive reward / total : {1} / {2}, mean reward: {3:.6f}'.format(epoch, positive_repair, len(names), mean_reward))
-                model.save(os.path.join(model_dir, '{}_{}'.format(model_name, epoch)), epoch=epoch, best_positive_repair=best_positive_repair)
+                model.save(os.path.join(model_dir, '{}_{}'.format(model_name, epoch)), epoch=epoch, best_positive_repair=best_positive_repair, context_config=context_config)
             else:
                 print('model NOT update. the {0}-th epoch. positive reward / total : {1} / {2}, mean reward: {3:.6f}'.format(epoch, positive_repair, len(names), mean_reward))
             if (epoch + 1) % checkpoint_every == 0:
-                model.save(get_periodic_checkpoint_path(model_dir, model_name, epoch), epoch=epoch, best_positive_repair=best_positive_repair)
+                model.save(get_periodic_checkpoint_path(model_dir, model_name, epoch), epoch=epoch, best_positive_repair=best_positive_repair, context_config=context_config)
 
                 
     if model_name == 'mutation':

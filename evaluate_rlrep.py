@@ -15,6 +15,11 @@ from genetic import compile_ok
 from main import Config_RL_multistep
 from multistep_RLRep import Model
 from preprocessing.selective_context import prepare_context_directory
+from preprocessing.context_config import (
+    DEFAULT_SLITHER_IMAGE,
+    build_context_config,
+    validate_checkpoint_context,
+)
 from smartBugs import VULN_KEYS, get_last_smart_details, smart
 from utils2 import choose_action, get_action
 
@@ -41,7 +46,7 @@ def parse_args():
         '--context-mode',
         '--context_mode',
         dest='context_mode',
-        choices=('original', 'selective'),
+        choices=('original', 'selective', 'selective_v1', 'evidence_graph'),
         default='original',
     )
     parser.add_argument(
@@ -50,7 +55,18 @@ def parse_args():
         dest='metadata_csv',
         default='',
     )
-    return parser.parse_args()
+    parser.add_argument('--context-token-budget', type=int, default=64)
+    parser.add_argument('--context-max-nodes', type=int, default=8)
+    parser.add_argument('--context-max-hops', type=int, default=2)
+    parser.add_argument('--context-fallback', choices=('selective_v1', 'original'), default='selective_v1')
+    parser.add_argument('--slither-image', default=DEFAULT_SLITHER_IMAGE)
+    parser.add_argument(
+        '--allow-legacy-context-checkpoint', action='store_true',
+        help='explicitly allow an unverifiable legacy checkpoint with evidence_graph')
+    args = parser.parse_args()
+    if args.context_token_budget < 1 or args.context_max_nodes < 1 or args.context_max_hops < 0:
+        parser.error('context token/node budgets must be positive and max hops cannot be negative')
+    return args
 
 
 def find_best_model_path(model_dir, model_name):
@@ -477,6 +493,14 @@ def print_summary(summary_rows):
 def main():
     args = parse_args()
     os.environ['RLREP_DETECT_PROFILE'] = args.detect_profile
+    context_config = build_context_config(
+        args.context_mode,
+        args.context_token_budget,
+        args.context_max_nodes,
+        args.context_max_hops,
+        args.context_fallback,
+        args.slither_image,
+    )
 
     dataset_path = os.path.abspath(args.dataset_path)
     if os.path.basename(dataset_path.rstrip('/\\')) != 'newALLBUGS':
@@ -515,6 +539,7 @@ def main():
         context_mode=args.context_mode,
         metadata_csv=args.metadata_csv,
         logger=None,
+        context_config=context_config,
     )
     for required_path in (contract_dir, code_dir, ast_dir):
         if not os.path.isdir(required_path):
@@ -526,6 +551,9 @@ def main():
     config = Config_RL_multistep()
     model = Model(config)
     checkpoint = model.load(model_path)
+    validate_checkpoint_context(
+        checkpoint, context_config, purpose='evaluation',
+        allow_legacy_evidence=args.allow_legacy_context_checkpoint)
     action_map = get_action()
 
     sample_rows = []
@@ -725,6 +753,7 @@ def main():
                 'detect_profile': args.detect_profile,
                 'detect_time_limit': args.detect_time_limit,
                 'context_mode': args.context_mode,
+                'context_config': context_config,
                 'metadata_csv': args.metadata_csv,
                 'sample_count': len(sample_rows),
                 'summary': summary_rows,
