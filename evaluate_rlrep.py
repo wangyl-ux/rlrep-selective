@@ -16,7 +16,9 @@ from main import Config_RL_multistep
 from multistep_RLRep import Model
 from preprocessing.selective_context import prepare_context_directory
 from preprocessing.context_config import (
+    DEFAULT_RULE_VERSION,
     DEFAULT_SLITHER_IMAGE,
+    SUPPORTED_RULE_VERSIONS,
     build_context_config,
     validate_checkpoint_context,
 )
@@ -59,6 +61,7 @@ def parse_args():
     parser.add_argument('--context-max-nodes', type=int, default=8)
     parser.add_argument('--context-max-hops', type=int, default=2)
     parser.add_argument('--context-fallback', choices=('selective_v1', 'original'), default='selective_v1')
+    parser.add_argument('--context-rule-version', choices=SUPPORTED_RULE_VERSIONS, default=DEFAULT_RULE_VERSION)
     parser.add_argument('--slither-image', default=DEFAULT_SLITHER_IMAGE)
     parser.add_argument(
         '--allow-legacy-context-checkpoint', action='store_true',
@@ -500,6 +503,7 @@ def main():
         args.context_max_hops,
         args.context_fallback,
         args.slither_image,
+        args.context_rule_version,
     )
 
     dataset_path = os.path.abspath(args.dataset_path)

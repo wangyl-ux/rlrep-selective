@@ -11,9 +11,9 @@ from solidityparser_compat import tokenize_code_fragment
 
 from preprocessing.context_config import (
     BACKEND,
+    DEFAULT_RULE_VERSION,
     DEFAULT_SLITHER_IMAGE,
     GRAPH_SCHEMA_VERSION,
-    RULE_VERSION,
     SOLC_VERSION,
     build_context_config,
     evidence_directory,
@@ -47,10 +47,10 @@ def source_hash(source):
     return hashlib.sha256(marker_free_source(source).encode("utf-8")).hexdigest()
 
 
-def graph_cache_key(clean_source_hash, slither_image):
+def graph_cache_key(clean_source_hash, slither_image, rule_version=DEFAULT_RULE_VERSION):
     value = "{}|{}|{}|image={}|schema={}|rules={}".format(
         clean_source_hash, BACKEND, SOLC_VERSION, slither_image,
-        GRAPH_SCHEMA_VERSION, RULE_VERSION)
+        GRAPH_SCHEMA_VERSION, rule_version)
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
@@ -72,8 +72,9 @@ def _mount_path(path):
     return os.path.abspath(path)
 
 
-def extract_graph_with_docker(source, source_digest, cache_dir, slither_image, timeout, force=False):
-    cache_key = graph_cache_key(source_digest, slither_image)
+def extract_graph_with_docker(source, source_digest, cache_dir, slither_image, timeout,
+                              force=False, rule_version=DEFAULT_RULE_VERSION):
+    cache_key = graph_cache_key(source_digest, slither_image, rule_version)
     graph_dir = os.path.join(cache_dir, "graphs")
     cache_path = os.path.join(graph_dir, cache_key + ".json")
     if not force and os.path.isfile(cache_path):
@@ -267,7 +268,7 @@ def _is_safemath(node):
     return "safemath" in expression or any(marker in expression for marker in (".add(", ".sub(", ".mul(", ".div("))
 
 
-def build_lightweight_graph(graph):
+def build_lightweight_graph(graph, rule_version=DEFAULT_RULE_VERSION):
     nodes = {}
     node_function = {}
     local_lookup = {}
@@ -392,6 +393,20 @@ def build_lightweight_graph(graph):
                     # This is a shared-variable GUARD approximation, not a full
                     # control-dependence graph.
                     edges.add((guard_id, operation_id, "GUARD"))
+        if rule_version == "v3":
+            # Slither 0.6.1 already exposes dominators on each CFG node. v3
+            # uses that fact to separate controlling guards from conditions
+            # that merely share a variable.
+            for operation_id in ids:
+                operation = nodes[operation_id]
+                dominator_locals = set(operation.get("dominator_locals", []) or [])
+                immediate = operation.get("immediate_dominator_local", "")
+                if immediate:
+                    dominator_locals.add(immediate)
+                for local_id in dominator_locals:
+                    guard_id = local_lookup.get((function_id, local_id))
+                    if guard_id and guard_id != operation_id and _is_guard(nodes[guard_id]):
+                        edges.add((guard_id, operation_id, "CONTROL_GUARD"))
     return nodes, node_function, functions, sorted(edges)
 
 
@@ -422,7 +437,135 @@ def add_candidate(candidates, node, priority, role):
     entry["roles"].add(role)
 
 
-def vulnerability_candidates(vuln_type, target_function, fault_node, nodes, node_function, functions, edges):
+def _vulnerability_candidates_v3(vuln_type, target_function, fault_node, nodes, node_function, functions, edges):
+    target_id = target_function.get("id")
+    target_nodes = [node for node_id, node in nodes.items() if node_function[node_id] == target_id]
+    fault_reads = _all_read_ids(fault_node)
+    fault_writes = _all_write_ids(fault_node)
+    fault_vars = fault_reads | fault_writes
+    candidates = {}
+    add_candidate(candidates, fault_node, 0, "fault_node")
+
+    if vuln_type == "RE":
+        call_reads = set()
+        for node in target_nodes:
+            if _is_external(node):
+                call_reads.update(_all_read_ids(node))
+        for node in target_nodes:
+            if _is_external(node):
+                add_candidate(candidates, node, 1, "re_external_call")
+            if _variable_ids(node, "state_variables_written"):
+                add_candidate(candidates, node, 1, "re_state_write")
+            if _is_guard(node) and (_all_read_ids(node) & fault_vars):
+                add_candidate(candidates, node, 2, "re_related_guard")
+            if _all_write_ids(node) & (fault_reads | call_reads):
+                add_candidate(candidates, node, 2, "re_call_argument_definition")
+    elif vuln_type == "TX":
+        role_vars = set()
+        for node in target_nodes:
+            if "tx.origin" in (node.get("expression") or "").lower():
+                add_candidate(candidates, node, 1, "tx_origin_condition")
+                role_vars.update(_all_read_ids(node))
+        for node in target_nodes:
+            if role_vars & (_all_read_ids(node) | _all_write_ids(node)):
+                add_candidate(candidates, node, 1 if "tx.origin" in (node.get("expression") or "").lower() else 2,
+                              "tx_role_variable")
+            if _is_guard(node) and role_vars & _all_read_ids(node):
+                add_candidate(candidates, node, 2, "tx_permission_guard")
+        for node in nodes.values():
+            if node.get("declared_variable_id") in role_vars:
+                add_candidate(candidates, node, 2, "tx_role_declaration")
+    elif vuln_type == "IO":
+        for node in target_nodes:
+            node_id = node.get("id")
+            node_reads = _all_read_ids(node)
+            node_writes = _all_write_ids(node)
+            if node_id != fault_node.get("id") and _is_arithmetic(node) and (node_reads | node_writes) & fault_vars:
+                add_candidate(candidates, node, 2, "io_related_arithmetic")
+            if node.get("id") != fault_node.get("id") and _all_write_ids(node) & fault_reads:
+                add_candidate(candidates, node, 1, "io_operand_definition")
+            if node_id != fault_node.get("id") and node_reads & fault_writes:
+                add_candidate(candidates, node, 2, "io_result_use")
+                if _is_guard(node):
+                    # An exact guard over the value produced at the fault is
+                    # more useful than a generic type declaration. Reserve it
+                    # at P1 so tight budgets retain the result invariant.
+                    add_candidate(candidates, node, 1, "io_exact_result_guard")
+            if _is_guard(node) and node_reads & fault_reads:
+                add_candidate(candidates, node, 2, "io_operand_guard")
+            if _is_safemath(node):
+                add_candidate(candidates, node, 2, "io_safemath_call")
+        for node in nodes.values():
+            if node.get("declared_variable_id") in fault_vars:
+                add_candidate(candidates, node, 2, "io_operand_type_declaration")
+    elif vuln_type == "ED":
+        fault_id = fault_node.get("id")
+        call_results = _all_write_ids(fault_node)
+        add_candidate(candidates, fault_node, 1, "ed_external_call")
+        result_guards = set()
+        for node in target_nodes:
+            if call_results & _all_write_ids(node):
+                add_candidate(candidates, node, 1, "ed_call_result")
+            if _is_guard(node) and call_results & _all_read_ids(node):
+                add_candidate(candidates, node, 1, "ed_result_check")
+                result_guards.add(node.get("id"))
+        for left, right, kind in edges:
+            if right == fault_id and kind == "CONTROL_GUARD" and left in nodes:
+                add_candidate(candidates, nodes[left], 1, "ed_dominating_call_guard")
+        # v2 treated every state write after a call as evidence. v3 only keeps
+        # a post-call effect when an exact result guard controls it; source
+        # order alone is not evidence of dependence and caused ED/IO confusion.
+        if call_results and result_guards:
+            for node in target_nodes:
+                node_id = node.get("id")
+                if not _variable_ids(node, "state_variables_written"):
+                    continue
+                controlled = any(
+                    left in result_guards and right == node_id and kind == "CONTROL_GUARD"
+                    for left, right, kind in edges)
+                if controlled:
+                    add_candidate(candidates, node, 2, "ed_result_controlled_state_effect")
+        # Bare send/call expressions already contain their receiver and value.
+        # Pull argument definitions only when a result data-flow exists; this
+        # prevents arithmetic definitions from dominating unchecked-send input.
+        if call_results:
+            for node in target_nodes:
+                if _all_write_ids(node) & fault_reads:
+                    add_candidate(candidates, node, 3, "ed_call_argument_source")
+    elif vuln_type == "TOD":
+        # v3 remains conservative but graph-native: only intraprocedural state
+        # facts, guards, modifiers and one-level calls are eligible. Shared
+        # state across unrelated functions is never treated as TOD proof.
+        relevant_state = (
+            _variable_ids(fault_node, "state_variables_read")
+            | _variable_ids(fault_node, "state_variables_written"))
+        for node in target_nodes:
+            node_state = (
+                _variable_ids(node, "state_variables_read")
+                | _variable_ids(node, "state_variables_written"))
+            if node.get("id") != fault_node.get("id") and relevant_state & node_state:
+                add_candidate(candidates, node, 1, "tod_local_state_dependency")
+                if _is_guard(node):
+                    add_candidate(candidates, node, 2, "tod_local_state_guard")
+        for left, right, kind in edges:
+            if right == fault_node.get("id") and kind == "CONTROL_GUARD" and left in nodes:
+                add_candidate(candidates, nodes[left], 2, "tod_dominating_guard")
+
+    # A single related modifier or internal callee summary is deliberately P3.
+    related_edge_kinds = {"MODIFIER", "CALL"}
+    for left, right, kind in edges:
+        if kind in related_edge_kinds and (left in candidates or left == fault_node.get("id")) and right in nodes:
+            add_candidate(candidates, nodes[right], 3 if vuln_type != "TX" else 2,
+                          "related_{}".format(kind.lower()))
+            callee_id = node_function.get(right)
+            if vuln_type == "TX":
+                for node_id, node in nodes.items():
+                    if node_function.get(node_id) == callee_id and _is_guard(node):
+                        add_candidate(candidates, node, 3, "tx_modifier_permission_guard")
+    return candidates
+
+
+def _vulnerability_candidates_v1(vuln_type, target_function, fault_node, nodes, node_function, functions, edges):
     if vuln_type == "TOD":
         # The current metadata contains no reliable ordered function pair or
         # detector dependency. Shared state alone is insufficient evidence of
@@ -510,6 +653,16 @@ def vulnerability_candidates(vuln_type, target_function, fault_node, nodes, node
     return candidates
 
 
+
+def vulnerability_candidates(vuln_type, target_function, fault_node, nodes, node_function,
+                             functions, edges, rule_version=DEFAULT_RULE_VERSION):
+    if rule_version == "v3":
+        return _vulnerability_candidates_v3(
+            vuln_type, target_function, fault_node, nodes, node_function, functions, edges)
+    return _vulnerability_candidates_v1(
+        vuln_type, target_function, fault_node, nodes, node_function, functions, edges)
+
+
 def _slice_source(clean_source, node):
     mapping = node.get("source", {})
     start = int(mapping.get("start", -1))
@@ -521,8 +674,8 @@ def _slice_source(clean_source, node):
 
 
 def select_budgeted_context(source, graph, row, token_budget, max_nodes, max_hops,
-                            diagnostics=None):
-    nodes, node_function, functions, edges = build_lightweight_graph(graph)
+                            diagnostics=None, rule_version=DEFAULT_RULE_VERSION):
+    nodes, node_function, functions, edges = build_lightweight_graph(graph, rule_version)
     if diagnostics is not None:
         diagnostics["graph_node_count"] = len(nodes)
         diagnostics["graph_edge_count"] = len(edges)
@@ -541,8 +694,10 @@ def select_budgeted_context(source, graph, row, token_budget, max_nodes, max_hop
     vuln_type, unused_source = choose_vulnerability_type(row)
     if not vuln_type:
         raise EvidenceFailure("unusable_vulnerability_type")
-    candidates = vulnerability_candidates(vuln_type, target, fault, nodes, node_function, functions, edges)
-    if len(candidates) <= 1:
+    candidates = vulnerability_candidates(
+        vuln_type, target, fault, nodes, node_function, functions, edges, rule_version)
+    allow_fault_only = rule_version == "v3" and vuln_type in ("ED", "TOD")
+    if len(candidates) <= 1 and not allow_fault_only:
         raise EvidenceFailure("no_supporting_graph_evidence")
     distances = shortest_hops(fault["id"], edges, int(max_hops))
 
@@ -563,7 +718,12 @@ def select_budgeted_context(source, graph, row, token_budget, max_nodes, max_hop
     selected_ids = {fault["id"]}
     covered_roles = set(selected[0]["roles"])
     token_count = len(selected[0]["tokens"])
-    while len(selected) < int(max_nodes):
+    # ED uses a small role-balanced subgraph. More nodes mostly reintroduced
+    # arithmetic/state noise around unchecked sends in v2.
+    selection_node_limit = (
+        min(int(max_nodes), 4)
+        if rule_version == "v3" and vuln_type == "ED" else int(max_nodes))
+    while len(selected) < selection_node_limit:
         available = []
         for node_id, entry in prepared.items():
             if node_id in selected_ids:
@@ -589,7 +749,7 @@ def select_budgeted_context(source, graph, row, token_budget, max_nodes, max_hop
         selected_ids.add(chosen["node"]["id"])
         covered_roles.update(chosen["roles"])
         token_count += additional
-    if len(selected) <= 1:
+    if len(selected) <= 1 and not allow_fault_only:
         raise EvidenceFailure("no_supporting_evidence_within_budget")
 
     spans = []
@@ -659,6 +819,7 @@ def prepare_evidence_context_directory(dataset_path, original_code_dir, contract
                                        slither_image=DEFAULT_SLITHER_IMAGE, docker_timeout=120,
                                        context_token_budget=64, context_max_nodes=8,
                                        context_max_hops=2, context_fallback="selective_v1",
+                                       context_rule_version=DEFAULT_RULE_VERSION,
                                        logger=None):
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     dataset_path = os.path.abspath(dataset_path)
@@ -670,7 +831,7 @@ def prepare_evidence_context_directory(dataset_path, original_code_dir, contract
         raise ValueError("evidence_graph cache/output must remain inside the current RLRep project: {}".format(dataset_path))
     config = build_context_config(
         "evidence_graph", context_token_budget, context_max_nodes, context_max_hops,
-        context_fallback, slither_image)
+        context_fallback, slither_image, context_rule_version)
     output_dir = evidence_directory(os.path.abspath(original_code_dir), config)
     log_dir = evidence_log_dir(dataset_path, split_name, config)
     cache_dir = os.path.join(dataset_path, "evidence_graph_cache")
@@ -693,7 +854,8 @@ def prepare_evidence_context_directory(dataset_path, original_code_dir, contract
         row, unused_match = (metadata_lookup.match(sample_name, contract_path, original_path)
                              if metadata_lookup.loaded else (None, "metadata_missing"))
         vuln_type, unused_source = choose_vulnerability_type(row or {})
-        if row is None or not vuln_type or vuln_type == "TOD" or not os.path.isfile(contract_path):
+        if (row is None or not vuln_type or not os.path.isfile(contract_path)
+                or context_rule_version == "v1" and vuln_type == "TOD"):
             continue
         with open(contract_path, "r", encoding="utf-8", errors="ignore") as contract_file:
             candidate_source = contract_file.read()
@@ -705,7 +867,7 @@ def prepare_evidence_context_directory(dataset_path, original_code_dir, contract
         future_hashes = {
             executor.submit(
                 extract_graph_with_docker, candidate_source, digest, cache_dir,
-                slither_image, docker_timeout, force): digest
+                slither_image, docker_timeout, force, context_rule_version): digest
             for digest, candidate_source in sorted(unique_sources.items())
         }
         for future in as_completed(future_hashes):
@@ -758,7 +920,7 @@ def prepare_evidence_context_directory(dataset_path, original_code_dir, contract
             record["vulnerability_type"] = vuln_type
             if not vuln_type:
                 raise EvidenceFailure("unusable_vulnerability_type")
-            if vuln_type == "TOD":
+            if context_rule_version == "v1" and vuln_type == "TOD":
                 raise EvidenceFailure("tod_missing_reliable_cross_function_evidence")
             fault_index, unused_fault_source = find_fault_index(source.splitlines(True), row)
             if fault_index < 0:
@@ -778,7 +940,8 @@ def prepare_evidence_context_directory(dataset_path, original_code_dir, contract
                 raise EvidenceFailure(extraction.get("failure_reason", "graph_extraction_failed"))
             serialized, details = select_budgeted_context(
                 source, extraction["graph"], selection_row, context_token_budget,
-                context_max_nodes, context_max_hops, diagnostics=record)
+                context_max_nodes, context_max_hops, diagnostics=record,
+                rule_version=context_rule_version)
             record.update(details)
             record["fallback"] = False
         except (EvidenceFailure, OSError, ValueError, TypeError) as exc:
@@ -822,7 +985,9 @@ def prepare_evidence_context_directory(dataset_path, original_code_dir, contract
         "by_vulnerability_type": {key: dict(value) for key, value in sorted(type_stats.items())},
         "limitations": [
             "LOCAL_RW and GUARD edges are deterministic approximations, not precise SSA def-use/control dependence",
-            "TOD falls back without reliable ordered function-pair metadata or detector dependency evidence",
+            ("TOD uses a conservative intraprocedural graph and does not infer ordering from shared state across functions"
+             if context_rule_version == "v3" else
+             "TOD falls back without reliable ordered function-pair metadata or detector dependency evidence"),
             "Stage 2 ED/TOD semantic-gate coverage is unchanged by this preprocessing-only feature",
         ],
     }
@@ -851,9 +1016,10 @@ def require_prepared_evidence_directory(dataset_path, original_code_dir, contrac
     manifest_path = os.path.join(output_dir, "manifest.json")
     command = ("python prepare_evidence_context.py --dataset-path {} --splits {} --workers 1 "
                "--context-token-budget {} --context-max-nodes {} --context-max-hops {} "
-               "--context-fallback {} --slither-image {}").format(
+               "--context-fallback {} --context-rule-version {} --slither-image {}").format(
                    dataset_path, split_name, context_config["token_budget"], context_config["max_nodes"],
-                   context_config["max_hops"], context_config["fallback"], context_config["slither_image"])
+                   context_config["max_hops"], context_config["fallback"],
+                   context_config["rule_version"], context_config["slither_image"])
     if metadata_csv:
         command += " --metadata-csv {}".format(metadata_csv)
     if not os.path.isfile(manifest_path):

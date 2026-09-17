@@ -2,7 +2,7 @@
 import argparse
 import os
 
-from preprocessing.context_config import DEFAULT_SLITHER_IMAGE
+from preprocessing.context_config import DEFAULT_RULE_VERSION, DEFAULT_SLITHER_IMAGE, SUPPORTED_RULE_VERSIONS
 from preprocessing.evidence_graph_context import prepare_evidence_context_directory
 
 
@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument("--context-max-nodes", type=int, default=8)
     parser.add_argument("--context-max-hops", type=int, default=2)
     parser.add_argument("--context-fallback", choices=("selective_v1", "original"), default="selective_v1")
+    parser.add_argument("--context-rule-version", choices=SUPPORTED_RULE_VERSIONS, default=DEFAULT_RULE_VERSION)
     args = parser.parse_args()
     if args.workers < 1:
         parser.error("--workers must be at least 1")
@@ -80,9 +81,9 @@ def main():
             context_max_nodes=args.context_max_nodes,
             context_max_hops=args.context_max_hops,
             context_fallback=args.context_fallback,
+            context_rule_version=args.context_rule_version,
         )
 
 
 if __name__ == "__main__":
     main()
-

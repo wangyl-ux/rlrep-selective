@@ -10,7 +10,9 @@ import json
 
 from preprocessing.selective_context import prepare_context_directory
 from preprocessing.context_config import (
+    DEFAULT_RULE_VERSION,
     DEFAULT_SLITHER_IMAGE,
+    SUPPORTED_RULE_VERSIONS,
     build_context_config,
     validate_checkpoint_context,
 )
@@ -264,6 +266,7 @@ def parse_main_args():
     parser.add_argument('--context-max-nodes', type=int, default=8)
     parser.add_argument('--context-max-hops', type=int, default=2)
     parser.add_argument('--context-fallback', choices=('selective_v1', 'original'), default='selective_v1')
+    parser.add_argument('--context-rule-version', choices=SUPPORTED_RULE_VERSIONS, default=DEFAULT_RULE_VERSION)
     parser.add_argument('--slither-image', default=DEFAULT_SLITHER_IMAGE)
     parser.add_argument(
         '--allow-legacy-context-checkpoint', action='store_true',
@@ -291,6 +294,7 @@ if __name__ == "__main__":
         args.context_max_hops,
         args.context_fallback,
         args.slither_image,
+        args.context_rule_version,
     )
     logger.info('context_config=%s', json.dumps(context_config, sort_keys=True))
     with open('{}/code_w2i.pkl'.format(path), 'rb') as f, open('{}/ast_w2i.pkl'.format(path), 'rb') as f2:
