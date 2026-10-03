@@ -269,9 +269,29 @@ def parse_main_args():
     parser.add_argument('--context-rule-version', choices=SUPPORTED_RULE_VERSIONS, default=DEFAULT_RULE_VERSION)
     parser.add_argument('--slither-image', default=DEFAULT_SLITHER_IMAGE)
     parser.add_argument(
+        '--validate-every',
+        '--validate_every',
+        dest='validate_every',
+        type=int,
+        default=5,
+        help='run full validation every N RL epochs (default: 5)',
+    )
+    parser.add_argument(
+        '--checkpoint-every',
+        '--checkpoint_every',
+        dest='checkpoint_every',
+        type=int,
+        default=5,
+        help='save a resumable periodic checkpoint every N epochs (default: 5)',
+    )
+    parser.add_argument(
         '--allow-legacy-context-checkpoint', action='store_true',
         help='explicitly allow an unverifiable legacy checkpoint with evidence_graph')
     args = parser.parse_args()
+    if args.validate_every < 1:
+        parser.error('--validate-every must be at least 1')
+    if args.checkpoint_every < 1:
+        parser.error('--checkpoint-every must be at least 1')
     if args.context_token_budget < 1 or args.context_max_nodes < 1 or args.context_max_hops < 0:
         parser.error('context token/node budgets must be positive and max hops cannot be negative')
     return args
@@ -287,6 +307,8 @@ if __name__ == "__main__":
     
     logger = get_logger('dataset_vul/newALLBUGS/log/{}_logging.txt'.format(model_name))
     logger.info('context mode: %s. metadata csv override: %s', args.context_mode, args.metadata_csv or '<default>')
+    logger.info('runtime controls: validate_every=%s checkpoint_every=%s',
+                args.validate_every, args.checkpoint_every)
     context_config = build_context_config(
         args.context_mode,
         args.context_token_budget,
@@ -308,7 +330,7 @@ if __name__ == "__main__":
     config = Config_RL_multistep()
 
     start = -1
-    checkpoint_every = 5
+    checkpoint_every = args.checkpoint_every
     if model_name == 'multistep_RLRep':
         from multistep_RLRep import *
         in_w2i = (code_w2i, ast_w2i)
@@ -387,6 +409,29 @@ if __name__ == "__main__":
                 loss = model(batch[:-1], True, batch[-1])
                 loss_actor += loss
                 logger.info('Epoch: {}, Batch: {}, Loss: actor:{}'.format(epoch, step, loss_actor / (step + 1),))
+
+            # Full validation compiles and analyzes generated contracts, so it is
+            # intentionally less frequent than the parameter updates. Validate
+            # once at RL start, at the configured interval, and at the end.
+            should_validate = (
+                epoch == train_start_epoch
+                or (epoch + 1) % args.validate_every == 0
+                or epoch == config.EPOCH - 1
+            )
+            if not should_validate:
+                logger.info(
+                    'Validation skipped at epoch %s (validate_every=%s).',
+                    epoch,
+                    args.validate_every,
+                )
+                if (epoch + 1) % checkpoint_every == 0:
+                    model.save(
+                        get_periodic_checkpoint_path(model_dir, model_name, epoch),
+                        epoch=epoch,
+                        best_positive_repair=best_positive_repair,
+                        context_config=context_config,
+                    )
+                continue
 
             preds, ats, names, rewards, reward_details = [], [], [], [], []
             valid_code_dir = validation_code_dir
