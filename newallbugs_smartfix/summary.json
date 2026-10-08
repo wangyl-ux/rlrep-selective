@@ -1,0 +1,11 @@
+{
+  "outputRoot": "D:\\angular2\\SmartFix-Artifact\\newallbugs_smartfix",
+  "supportedTotal": 98,
+  "skippedTotal": 73,
+  "issueTotal": 0,
+  "countByType": {
+    "IO": 45,
+    "RE": 10,
+    "TX": 43
+  }
+}

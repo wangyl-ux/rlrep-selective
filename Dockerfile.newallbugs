@@ -1,0 +1,61 @@
+ARG BASE_IMAGE=ocaml/opam:ubuntu-20.04
+FROM ${BASE_IMAGE}
+
+LABEL maintainer "Sunbeom So <sunbeom_so@korea.ac.kr>"
+LABEL description "SmartFix image trimmed for newALLBUGS IO/RE/TX experiments"
+
+ARG CORE=40
+
+RUN sudo apt-get update && sudo apt-get -y upgrade
+RUN sudo apt-get install -y wget unzip git build-essential software-properties-common curl m4 ocaml-findlib libgmp-dev autoconf vim
+
+# OCaml 4.11.1
+RUN opam init && eval $(opam env)
+RUN opam switch create 4.11.1 && eval $(opam env)
+
+# OCaml deps
+RUN opam update && opam upgrade
+RUN eval $(opam env) && opam install -y conf-m4.1 ocamlfind ocamlbuild num yojson batteries ocamlgraph zarith csv pyml
+
+# Z3
+WORKDIR /home/opam
+RUN sudo wget -q https://github.com/Z3Prover/z3/archive/refs/tags/z3-4.11.2.tar.gz
+RUN sudo tar -xvzf z3-4.11.2.tar.gz
+RUN sudo chown -R opam z3-z3-4.11.2
+WORKDIR /home/opam/z3-z3-4.11.2
+RUN eval $(opam env) && \
+    python3 scripts/mk_make.py --ml && \
+    cd build && \
+    make -j $CORE && sudo make install
+WORKDIR /home/opam
+
+# Python 3.8
+RUN sudo apt-get install -y python3.8 python3.8-distutils python3-pip
+RUN pip3 install matplotlib numpy web3 scikit-learn==0.24.1
+
+# Solidity compilers required by newALLBUGS SmartFix supported subset.
+# See newallbugs_smartfix/supported_samples.csv.
+RUN for i in \
+   "0.4.11" "0.4.16" "0.4.17" "0.4.18" "0.4.19" "0.4.21" "0.4.23" "0.4.24" "0.4.25"; \
+    do \
+      wget -q https://github.com/ethereum/solidity/releases/download/v$i/solc-static-linux; \
+      chmod +x solc-static-linux; \
+      sudo mv solc-static-linux /usr/bin/solc_$i; \
+    done
+RUN sudo cp /usr/bin/solc_0.4.25 /usr/bin/solc
+
+# SmartFix
+WORKDIR /home/opam
+COPY ./SmartFix /home/opam/SmartFix
+RUN sudo chown -R opam /home/opam/SmartFix
+WORKDIR /home/opam/SmartFix
+RUN eval $(opam env) && chmod +x build; ./build
+
+WORKDIR /home/opam
+
+# Benchmarks and scripts. newALLBUGS benchmarks are mounted at runtime.
+COPY ./fix_experiment /home/opam/fix_experiment
+RUN sudo chown -R opam /home/opam/fix_experiment
+RUN mkdir /home/opam/fix_result
+
+CMD ["/bin/bash"]
